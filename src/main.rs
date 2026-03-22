@@ -1,3 +1,4 @@
+mod compressors;
 mod runner;
 
 fn main() {
