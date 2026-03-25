@@ -30,9 +30,16 @@ impl Compressor for GitDiffCompressor {
         !tail.iter().any(|arg| SKIP_FLAGS.contains(&arg.as_str()))
     }
 
-    /// Stub — returns original args unchanged.
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
-        original_args.to_vec()
+        let mut result = vec![
+            "diff".to_string(),
+            "--unified=1".to_string(),
+            "--diff-algorithm=histogram".to_string(),
+            "--no-ext-diff".to_string(),
+            "--no-color".to_string(),
+        ];
+        result.extend(original_args[1..].iter().cloned());
+        result
     }
 
     /// Stub — returns None (no compression yet).
@@ -141,6 +148,48 @@ mod tests {
     #[test]
     fn skip_diff_ext_diff() {
         assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--ext-diff"])));
+    }
+
+    // --- normalized_args ---
+
+    #[test]
+    fn normalized_args_bare_diff() {
+        let args: Vec<String> = vec!["diff".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec![
+            "diff", "--unified=1", "--diff-algorithm=histogram",
+            "--no-ext-diff", "--no-color",
+        ]);
+    }
+
+    #[test]
+    fn normalized_args_with_staged() {
+        let args: Vec<String> = vec!["diff".into(), "--staged".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec![
+            "diff", "--unified=1", "--diff-algorithm=histogram",
+            "--no-ext-diff", "--no-color", "--staged",
+        ]);
+    }
+
+    #[test]
+    fn normalized_args_with_commits() {
+        let args: Vec<String> = vec!["diff".into(), "HEAD~3".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec![
+            "diff", "--unified=1", "--diff-algorithm=histogram",
+            "--no-ext-diff", "--no-color", "HEAD~3",
+        ]);
+    }
+
+    #[test]
+    fn normalized_args_user_override_unified() {
+        let args: Vec<String> = vec!["diff".into(), "--unified=3".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec![
+            "diff", "--unified=1", "--diff-algorithm=histogram",
+            "--no-ext-diff", "--no-color", "--unified=3",
+        ]);
     }
 
     // --- non-diff commands ---
