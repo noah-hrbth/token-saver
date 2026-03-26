@@ -19,3 +19,21 @@ fn compare_git_status() {
 
     common::print_summary(&results);
 }
+
+#[test]
+#[ignore]
+fn compare_git_diff() {
+    let scenarios = common::git_diff::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}

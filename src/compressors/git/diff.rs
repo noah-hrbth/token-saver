@@ -1,3 +1,11 @@
+// TODO: Semantic compression — Layer 5 techniques for v2
+// #23: Detect moved blocks — large delete + identical add elsewhere → "(moved from line X)".
+//      High token savings for refactors, high implementation complexity.
+// #24: Collapse large uniform additions — e.g. 30 consecutive `+use ...` lines →
+//      `+use ... (28 more imports)`. High savings when triggered, medium complexity.
+// #26: Factor common path prefix — when all files share a deep prefix like
+//      `src/compressors/git/`, show it once. Low-medium savings, low complexity.
+
 use crate::compressors::Compressor;
 
 pub struct GitDiffCompressor;
