@@ -42,9 +42,31 @@ impl Compressor for GitDiffCompressor {
         result
     }
 
-    /// Stub — returns None (no compression yet).
-    fn compress(&self, _stdout: &str, _stderr: &str, _exit_code: i32) -> Option<String> {
-        None
+    fn compress(&self, stdout: &str, _stderr: &str, exit_code: i32) -> Option<String> {
+        if exit_code != 0 {
+            return None;
+        }
+        if stdout.trim().is_empty() {
+            return Some(String::new());
+        }
+
+        let files = parse_diff(stdout);
+        if files.is_empty() {
+            return None;
+        }
+
+        let mut output = String::new();
+
+        if files.len() >= 2 {
+            output.push_str(&stat_summary(&files));
+            output.push_str("\n\n");
+        }
+
+        for file in &files {
+            output.push_str(&format_file(file));
+        }
+
+        Some(output)
     }
 }
 
@@ -221,6 +243,136 @@ fn parse_hunk_header(line: &str) -> Hunk {
     }
 
     Hunk { old_start, new_start, function_context, lines: Vec::new() }
+}
+
+// --- Formatting ---
+
+/// Format a single DiffFile into compressed output.
+fn format_file(file: &DiffFile) -> String {
+    let mut output = String::new();
+
+    match file.status {
+        FileStatus::New => output.push_str(&format!("{} (new)\n", file.path)),
+        FileStatus::Deleted => output.push_str(&format!("{} (deleted)\n", file.path)),
+        FileStatus::Renamed => {
+            let old = file.old_path.as_deref().unwrap_or("?");
+            output.push_str(&format!("{} \u{2192} {}\n", old, file.path));
+        }
+        FileStatus::ModeChanged => {
+            let old = file.old_mode.as_deref().unwrap_or("?");
+            let new = file.new_mode.as_deref().unwrap_or("?");
+            output.push_str(&format!("{} (mode {} \u{2192} {})\n", file.path, old, new));
+        }
+        FileStatus::Binary => {
+            output.push_str(&format!("{} (binary, changed)\n", file.path));
+        }
+        FileStatus::Normal => output.push_str(&format!("{}\n", file.path)),
+    }
+
+    for hunk in &file.hunks {
+        output.push_str(&format_hunk(hunk));
+    }
+
+    output
+}
+
+/// Format a hunk: compressed header + content lines.
+fn format_hunk(hunk: &Hunk) -> String {
+    let mut output = String::new();
+
+    // Hunk header — line numbers without counts
+    let old_part = if hunk.old_start > 0 {
+        format!("-{}", hunk.old_start)
+    } else {
+        String::new()
+    };
+    let new_part = if hunk.new_start > 0 {
+        format!("+{}", hunk.new_start)
+    } else {
+        String::new()
+    };
+
+    match &hunk.function_context {
+        Some(ctx) => output.push_str(&format!("@@ {} {} @@ {}\n", old_part, new_part, ctx)),
+        None => output.push_str(&format!("@@ {} {}\n", old_part, new_part)),
+    }
+
+    // Whitespace-only collapse
+    if is_whitespace_only_hunk(hunk) {
+        output.push_str("(whitespace changes)\n");
+        return output;
+    }
+
+    for line in &hunk.lines {
+        match line {
+            DiffLine::Context(s) => output.push_str(&format!(" {}\n", s)),
+            DiffLine::Added(s) => output.push_str(&format!("+{}\n", s)),
+            DiffLine::Removed(s) => output.push_str(&format!("-{}\n", s)),
+        }
+    }
+
+    output
+}
+
+/// Check if a hunk only contains whitespace changes.
+/// After trimming whitespace, the multiset of removed lines equals the multiset of added lines.
+fn is_whitespace_only_hunk(hunk: &Hunk) -> bool {
+    let mut removed: Vec<String> = Vec::new();
+    let mut added: Vec<String> = Vec::new();
+
+    for line in &hunk.lines {
+        match line {
+            DiffLine::Removed(s) => removed.push(s.split_whitespace().collect()),
+            DiffLine::Added(s) => added.push(s.split_whitespace().collect()),
+            DiffLine::Context(_) => {}
+        }
+    }
+
+    if removed.is_empty() && added.is_empty() {
+        return false;
+    }
+
+    removed.sort();
+    added.sort();
+    removed == added
+}
+
+/// Build stat summary line for multi-file diffs.
+fn stat_summary(files: &[DiffFile]) -> String {
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+
+    for file in files {
+        for hunk in &file.hunks {
+            for line in &hunk.lines {
+                match line {
+                    DiffLine::Added(_) => insertions += 1,
+                    DiffLine::Removed(_) => deletions += 1,
+                    DiffLine::Context(_) => {}
+                }
+            }
+        }
+    }
+
+    let files_part = if files.len() == 1 {
+        "1 file changed".to_string()
+    } else {
+        format!("{} files changed", files.len())
+    };
+
+    let ins_part = if insertions == 1 {
+        "1 insertion(+)".to_string()
+    } else {
+        format!("{} insertions(+)", insertions)
+    };
+
+    let del_part = if deletions == 1 {
+        "1 deletion(-)".to_string()
+    } else {
+        format!("{} deletions(-)", deletions)
+    };
+
+    format!("{}, {}, {}", files_part, ins_part, del_part)
 }
 
 #[cfg(test)]
@@ -476,6 +628,126 @@ mod tests {
         assert_eq!(files[0].hunks[1].old_start, 10);
         assert_eq!(files[0].hunks[1].function_context, Some("fn second".to_string()));
     }
+
+    // --- compress / formatting tests ---
+
+    #[test]
+    fn compress_single_file() {
+        let input = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@ fn main\n fn main() {\n+    println!(\"hello\");\n }\n";
+        let result = GitDiffCompressor.compress(input, "", 0);
+        let output = result.unwrap();
+        assert!(output.starts_with("src/main.rs\n"));
+        assert!(output.contains("@@ -1 +1 @@ fn main\n"));
+        assert!(output.contains("+    println!(\"hello\");\n"));
+    }
+
+    #[test]
+    fn compress_new_file() {
+        let input = "diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644\nindex 0000000..abc1234\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,2 @@\n+fn new_fn() {\n+}\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.starts_with("src/new.rs (new)\n"));
+        assert!(result.contains("+fn new_fn() {\n"));
+    }
+
+    #[test]
+    fn compress_deleted_file() {
+        let input = "diff --git a/src/old.rs b/src/old.rs\ndeleted file mode 100644\nindex abc1234..0000000\n--- a/src/old.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-fn old_fn() {\n-}\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("src/old.rs (deleted)\n"));
+        assert!(result.contains("-fn old_fn() {\n"));
+    }
+
+    #[test]
+    fn compress_renamed_file() {
+        let input = "diff --git a/old.rs b/new.rs\nsimilarity index 95%\nrename from old.rs\nrename to new.rs\nindex abc..def 100644\n--- a/old.rs\n+++ b/new.rs\n@@ -1,2 +1,2 @@\n-fn old() {}\n+fn new() {}\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.starts_with("old.rs \u{2192} new.rs\n"));
+        assert!(result.contains("-fn old() {}"));
+        assert!(result.contains("+fn new() {}"));
+    }
+
+    #[test]
+    fn compress_mode_change() {
+        let input = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("script.sh (mode 100644 \u{2192} 100755)"));
+    }
+
+    #[test]
+    fn compress_binary_file() {
+        let input = "diff --git a/image.png b/image.png\nindex abc..def 100644\nBinary files a/image.png and b/image.png differ\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("image.png (binary, changed)"));
+    }
+
+    #[test]
+    fn compress_hunk_no_function_context() {
+        let input = "diff --git a/file.txt b/file.txt\nindex abc..def 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,3 @@\n line1\n+line2\n line3\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("@@ -1 +1\n"), "Expected hunk header without function context in:\n{}", result);
+    }
+
+    // --- stat summary tests ---
+
+    #[test]
+    fn compress_multifile_has_stat_summary() {
+        let input = "diff --git a/src/a.rs b/src/a.rs\nindex abc..def 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn a() {\n+    // changed\n }\ndiff --git a/src/b.rs b/src/b.rs\nindex abc..def 100644\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,3 +1,2 @@\n fn b() {\n-    // removed\n }\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.starts_with("2 files changed, 1 insertion(+), 1 deletion(-)\n\n"), "Got:\n{}", result);
+    }
+
+    #[test]
+    fn compress_single_file_no_stat_summary() {
+        let input = "diff --git a/src/a.rs b/src/a.rs\nindex abc..def 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn a() {\n+    // changed\n }\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.starts_with("src/a.rs\n"), "Single file should not have stat summary. Got:\n{}", result);
+    }
+
+    // --- whitespace collapse tests ---
+
+    #[test]
+    fn compress_whitespace_only_hunk() {
+        let input = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@ fn main\n-    old_line();\n-    another();\n+        old_line();\n+        another();\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("(whitespace changes)"), "Expected whitespace collapse in:\n{}", result);
+        assert!(!result.contains("-    old_line"), "Should not contain original lines:\n{}", result);
+    }
+
+    #[test]
+    fn compress_non_whitespace_hunk_preserved() {
+        let input = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,2 @@ fn main\n-    old_line();\n+    new_line();\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("-    old_line();"), "Non-whitespace hunk should be preserved:\n{}", result);
+        assert!(!result.contains("(whitespace changes)"), "Should not be collapsed:\n{}", result);
+    }
+
+    // --- error handling tests ---
+
+    #[test]
+    fn compress_nonzero_exit_returns_none() {
+        let result = GitDiffCompressor.compress("anything", "fatal: error", 128);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compress_empty_diff_returns_empty_string() {
+        let result = GitDiffCompressor.compress("", "", 0);
+        assert_eq!(result, Some(String::new()));
+    }
+
+    #[test]
+    fn compress_whitespace_only_input_returns_empty_string() {
+        let result = GitDiffCompressor.compress("  \n\n  ", "", 0);
+        assert_eq!(result, Some(String::new()));
+    }
+
+    #[test]
+    fn compress_garbage_input_returns_none() {
+        let result = GitDiffCompressor.compress("not a diff at all", "", 0);
+        assert_eq!(result, None);
+    }
+
+    // --- parsing edge case tests ---
 
     #[test]
     fn parse_no_newline_at_end_stripped() {
