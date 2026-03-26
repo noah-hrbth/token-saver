@@ -16,25 +16,66 @@ mkdir -p "$INSTALL_DIR"
 cp target/release/token-saver "$INSTALL_DIR/token-saver"
 chmod +x "$INSTALL_DIR/token-saver"
 
-# Create symlinks (remove old ones first for idempotency)
+# Clean up legacy symlinks from older installs
 COMMANDS=(git)
 for cmd in "${COMMANDS[@]}"; do
-    rm -f "$INSTALL_DIR/$cmd"
-    ln -s token-saver "$INSTALL_DIR/$cmd"
-    echo "  Created symlink: $INSTALL_DIR/$cmd -> token-saver"
+    if [ -L "$INSTALL_DIR/$cmd" ]; then
+        rm -f "$INSTALL_DIR/$cmd"
+        echo "  Removed legacy symlink: $INSTALL_DIR/$cmd"
+    fi
 done
+
+# Add shell functions to profile (guarded by TOKEN_SAVER env var).
+#
+# Why functions instead of PATH symlinks:
+#   Tools like Oh My Zsh call `command git` internally, which bypasses
+#   shell functions and goes straight to PATH lookup → real git.
+#   Only interactive user/agent calls go through the function → token-saver.
+#   This guarantees no external tool ever sees compressed output.
+HOOK_BLOCK='# token-saver: wrap commands for LLM output compression
+if [ "$TOKEN_SAVER" = "1" ]; then
+    git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
+fi'
+
+add_shell_hook() {
+    local profile="$1"
+    # Remove legacy PATH hook from older installs
+    if [ -f "$profile" ] && grep -qF 'token-saver/bin:$PATH' "$profile"; then
+        # Remove the old PATH-based hook lines
+        sed -i.bak '/# token-saver: prepend wrapper/d; /token-saver\/bin:\$PATH/d' "$profile"
+        rm -f "${profile}.bak"
+        echo "  Removed legacy PATH hook from $profile"
+    fi
+    if [ -f "$profile" ] && grep -qF 'token-saver' "$profile"; then
+        echo "  Shell hook already in $profile — skipping"
+        return
+    fi
+    # Create profile if it doesn't exist
+    touch "$profile"
+    printf '\n%s\n' "$HOOK_BLOCK" >> "$profile"
+    echo "  Added shell functions to $profile"
+}
+
+echo ""
+echo "Configuring shell profile..."
+SHELL_NAME="$(basename "$SHELL")"
+case "$SHELL_NAME" in
+    zsh)  add_shell_hook "$HOME/.zshrc" ;;
+    bash) add_shell_hook "$HOME/.bashrc" ;;
+    *)    echo "  Unknown shell ($SHELL_NAME) — add this to your profile manually:"
+          echo "    $HOOK_BLOCK" ;;
+esac
 
 echo ""
 echo "Installation complete!"
 echo ""
-echo "To configure Claude Code, add this to ~/.claude/settings.json:"
+echo "To configure Claude Code, add this to ~/.claude/settings.json"
+echo "inside the top-level object:"
 echo ""
-echo '{'
 echo '  "env": {'
-echo "    \"TOKEN_SAVER\": \"1\","
-echo "    \"PATH\": \"$INSTALL_DIR:\$PATH\""
+echo '    "TOKEN_SAVER": "1"'
 echo '  }'
-echo '}'
 echo ""
 echo "To test manually:"
-echo "  TOKEN_SAVER=1 $INSTALL_DIR/git status"
+echo "  source ~/.zshrc  # or ~/.bashrc"
+echo "  TOKEN_SAVER=1 git status"

@@ -83,9 +83,7 @@ fn main() {
                         }
                         None => {
                             // Compression failed — fall back to running with original args
-                            if let Err(e) =
-                                runner::exec_passthrough(&real_binary, &command_args)
-                            {
+                            if let Err(e) = runner::exec_passthrough(&real_binary, &command_args) {
                                 eprintln!("token-saver: failed to exec {}: {}", command, e);
                                 process::exit(1);
                             }

@@ -221,10 +221,7 @@ pub fn print_summary(results: &[ScenarioResult]) {
     let sep: String = std::iter::repeat_n('─', 70).collect();
 
     println!("\n{dim}{sep}{reset}");
-    println!(
-        "{bold}{cyan} SUMMARY — {} scenarios{reset}",
-        results.len()
-    );
+    println!("{bold}{cyan} SUMMARY — {} scenarios{reset}", results.len());
     println!("{dim}{sep}{reset}");
 
     // Table header
@@ -233,9 +230,7 @@ pub fn print_summary(results: &[ScenarioResult]) {
         "Scenario", "Raw", "Comp", "Saved"
     );
     let rule = "──────────────────────────────────────";
-    println!(
-        "  {dim}{rule} ─────  ─────  ──────────{reset}"
-    );
+    println!("  {dim}{rule} ─────  ─────  ──────────{reset}");
 
     // Per-scenario rows
     let mut total_raw = 0usize;
@@ -275,9 +270,7 @@ pub fn print_summary(results: &[ScenarioResult]) {
     };
     let total_saved_col = format!("{} ({}%)", total_saved, total_pct);
 
-    println!(
-        "  {dim}{rule} ─────  ─────  ──────────{reset}"
-    );
+    println!("  {dim}{rule} ─────  ─────  ──────────{reset}");
     println!(
         "  {bold}{:<38} {red}{:>5}{reset}  {green}{bold}{:>5}{reset}  {bold}{:>10}{reset}",
         "TOTAL", total_raw, total_comp, total_saved_col

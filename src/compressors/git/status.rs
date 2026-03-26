@@ -4,6 +4,9 @@ pub struct GitStatusCompressor;
 
 impl Compressor for GitStatusCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
+        // Match any `git status` invocation. Safe because only agent/user calls
+        // reach token-saver (via shell function). Tools like Oh My Zsh use
+        // `command git` which bypasses the function entirely.
         args.first().map(|s| s.as_str()) == Some("status")
     }
 
@@ -146,7 +149,9 @@ fn parse_rename_entry(entry: &str, orig_path: &str, files: &mut FileChanges) {
     let is_copy = score_field.starts_with('C');
 
     if is_copy {
-        files.renamed.push(format!("{} -> {} (copy)", orig_path, new_path));
+        files
+            .renamed
+            .push(format!("{} -> {} (copy)", orig_path, new_path));
     } else {
         files.renamed.push(format!("{} -> {}", orig_path, new_path));
     }
@@ -352,7 +357,10 @@ mod tests {
         let result = compress(input);
         assert_eq!(
             result,
-            Some("branch: main (up to date with origin/main)\nrenamed: old_name.rs -> new_name.rs".to_string())
+            Some(
+                "branch: main (up to date with origin/main)\nrenamed: old_name.rs -> new_name.rs"
+                    .to_string()
+            )
         );
     }
 
@@ -367,7 +375,9 @@ u UU N... 100644 100644 100644 100644 abc123 def456 789abc src/conflict.rs\0";
         let result = compress(input);
         assert_eq!(
             result,
-            Some("branch: main (up to date with origin/main)\nconflict: src/conflict.rs".to_string())
+            Some(
+                "branch: main (up to date with origin/main)\nconflict: src/conflict.rs".to_string()
+            )
         );
     }
 
@@ -390,5 +400,30 @@ u UU N... 100644 100644 100644 100644 abc123 def456 789abc src/conflict.rs\0";
     fn test_nonzero_exit_returns_none() {
         let result = GitStatusCompressor.compress("anything", "fatal: error", 128);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_compress_bare_status() {
+        assert!(GitStatusCompressor.can_compress(&["status".into()]));
+    }
+
+    #[test]
+    fn test_compress_status_with_flags() {
+        let c = GitStatusCompressor;
+        // All git status variants are safe to compress because only agent/user
+        // calls reach token-saver (shell function). Tools use `command git`.
+        assert!(c.can_compress(&["status".into(), "--porcelain".into()]));
+        assert!(c.can_compress(&["status".into(), "-s".into()]));
+        assert!(c.can_compress(&["status".into(), "-u".into()]));
+        assert!(c.can_compress(&["status".into(), ".".into()]));
+        assert!(c.can_compress(&["status".into(), "--porcelain".into(), "-b".into()]));
+    }
+
+    #[test]
+    fn test_skip_non_status_commands() {
+        let c = GitStatusCompressor;
+        assert!(!c.can_compress(&["diff".into()]));
+        assert!(!c.can_compress(&["log".into()]));
+        assert!(!c.can_compress(&[]));
     }
 }

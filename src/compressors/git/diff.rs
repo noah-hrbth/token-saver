@@ -189,7 +189,14 @@ fn parse_file_chunk(chunk: &str) -> DiffFile {
         None => Vec::new(),
     };
 
-    DiffFile { path, status, old_path, old_mode, new_mode, hunks }
+    DiffFile {
+        path,
+        status,
+        old_path,
+        old_mode,
+        new_mode,
+        hunks,
+    }
 }
 
 /// Parse hunk headers and content lines.
@@ -250,7 +257,12 @@ fn parse_hunk_header(line: &str) -> Hunk {
         }
     }
 
-    Hunk { old_start, new_start, function_context, lines: Vec::new() }
+    Hunk {
+        old_start,
+        new_start,
+        function_context,
+        lines: Vec::new(),
+    }
 }
 
 // --- Formatting ---
@@ -491,40 +503,67 @@ mod tests {
     fn normalized_args_bare_diff() {
         let args: Vec<String> = vec!["diff".into()];
         let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(result, vec![
-            "diff", "--unified=1", "--diff-algorithm=histogram",
-            "--no-ext-diff", "--no-color",
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+            ]
+        );
     }
 
     #[test]
     fn normalized_args_with_staged() {
         let args: Vec<String> = vec!["diff".into(), "--staged".into()];
         let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(result, vec![
-            "diff", "--unified=1", "--diff-algorithm=histogram",
-            "--no-ext-diff", "--no-color", "--staged",
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+                "--staged",
+            ]
+        );
     }
 
     #[test]
     fn normalized_args_with_commits() {
         let args: Vec<String> = vec!["diff".into(), "HEAD~3".into()];
         let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(result, vec![
-            "diff", "--unified=1", "--diff-algorithm=histogram",
-            "--no-ext-diff", "--no-color", "HEAD~3",
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+                "HEAD~3",
+            ]
+        );
     }
 
     #[test]
     fn normalized_args_user_override_unified() {
         let args: Vec<String> = vec!["diff".into(), "--unified=3".into()];
         let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(result, vec![
-            "diff", "--unified=1", "--diff-algorithm=histogram",
-            "--no-ext-diff", "--no-color", "--unified=3",
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+                "--unified=3",
+            ]
+        );
     }
 
     // --- non-diff commands ---
@@ -617,13 +656,16 @@ mod tests {
         assert_eq!(hunk.function_context, Some("fn main".to_string()));
         assert_eq!(hunk.old_start, 1);
         assert_eq!(hunk.new_start, 1);
-        assert_eq!(hunk.lines, vec![
-            DiffLine::Context("fn main() {".to_string()),
-            DiffLine::Removed("    old_line();".to_string()),
-            DiffLine::Added("    new_line();".to_string()),
-            DiffLine::Added("    extra_line();".to_string()),
-            DiffLine::Context("}".to_string()),
-        ]);
+        assert_eq!(
+            hunk.lines,
+            vec![
+                DiffLine::Context("fn main() {".to_string()),
+                DiffLine::Removed("    old_line();".to_string()),
+                DiffLine::Added("    new_line();".to_string()),
+                DiffLine::Added("    extra_line();".to_string()),
+                DiffLine::Context("}".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -632,9 +674,15 @@ mod tests {
         let files = parse_diff(raw);
         assert_eq!(files[0].hunks.len(), 2);
         assert_eq!(files[0].hunks[0].old_start, 1);
-        assert_eq!(files[0].hunks[0].function_context, Some("fn first".to_string()));
+        assert_eq!(
+            files[0].hunks[0].function_context,
+            Some("fn first".to_string())
+        );
         assert_eq!(files[0].hunks[1].old_start, 10);
-        assert_eq!(files[0].hunks[1].function_context, Some("fn second".to_string()));
+        assert_eq!(
+            files[0].hunks[1].function_context,
+            Some("fn second".to_string())
+        );
     }
 
     // --- compress / formatting tests ---
@@ -692,7 +740,11 @@ mod tests {
     fn compress_hunk_no_function_context() {
         let input = "diff --git a/file.txt b/file.txt\nindex abc..def 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,3 @@\n line1\n+line2\n line3\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
-        assert!(result.contains("@@ -1 +1\n"), "Expected hunk header without function context in:\n{}", result);
+        assert!(
+            result.contains("@@ -1 +1\n"),
+            "Expected hunk header without function context in:\n{}",
+            result
+        );
     }
 
     // --- stat summary tests ---
@@ -701,14 +753,22 @@ mod tests {
     fn compress_multifile_has_stat_summary() {
         let input = "diff --git a/src/a.rs b/src/a.rs\nindex abc..def 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn a() {\n+    // changed\n }\ndiff --git a/src/b.rs b/src/b.rs\nindex abc..def 100644\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1,3 +1,2 @@\n fn b() {\n-    // removed\n }\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
-        assert!(result.starts_with("2 files changed, 1 insertion(+), 1 deletion(-)\n\n"), "Got:\n{}", result);
+        assert!(
+            result.starts_with("2 files changed, 1 insertion(+), 1 deletion(-)\n\n"),
+            "Got:\n{}",
+            result
+        );
     }
 
     #[test]
     fn compress_single_file_no_stat_summary() {
         let input = "diff --git a/src/a.rs b/src/a.rs\nindex abc..def 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,2 +1,3 @@\n fn a() {\n+    // changed\n }\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
-        assert!(result.starts_with("src/a.rs\n"), "Single file should not have stat summary. Got:\n{}", result);
+        assert!(
+            result.starts_with("src/a.rs\n"),
+            "Single file should not have stat summary. Got:\n{}",
+            result
+        );
     }
 
     // --- whitespace collapse tests ---
@@ -717,16 +777,32 @@ mod tests {
     fn compress_whitespace_only_hunk() {
         let input = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@ fn main\n-    old_line();\n-    another();\n+        old_line();\n+        another();\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
-        assert!(result.contains("(whitespace changes)"), "Expected whitespace collapse in:\n{}", result);
-        assert!(!result.contains("-    old_line"), "Should not contain original lines:\n{}", result);
+        assert!(
+            result.contains("(whitespace changes)"),
+            "Expected whitespace collapse in:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("-    old_line"),
+            "Should not contain original lines:\n{}",
+            result
+        );
     }
 
     #[test]
     fn compress_non_whitespace_hunk_preserved() {
         let input = "diff --git a/src/main.rs b/src/main.rs\nindex abc..def 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,2 @@ fn main\n-    old_line();\n+    new_line();\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
-        assert!(result.contains("-    old_line();"), "Non-whitespace hunk should be preserved:\n{}", result);
-        assert!(!result.contains("(whitespace changes)"), "Should not be collapsed:\n{}", result);
+        assert!(
+            result.contains("-    old_line();"),
+            "Non-whitespace hunk should be preserved:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("(whitespace changes)"),
+            "Should not be collapsed:\n{}",
+            result
+        );
     }
 
     // --- error handling tests ---
@@ -762,9 +838,12 @@ mod tests {
         let raw = "diff --git a/file.txt b/file.txt\nindex abc..def 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
         let files = parse_diff(raw);
         let hunk = &files[0].hunks[0];
-        assert_eq!(hunk.lines, vec![
-            DiffLine::Removed("old".to_string()),
-            DiffLine::Added("new".to_string()),
-        ]);
+        assert_eq!(
+            hunk.lines,
+            vec![
+                DiffLine::Removed("old".to_string()),
+                DiffLine::Added("new".to_string()),
+            ]
+        );
     }
 }

@@ -4,12 +4,14 @@ A transparent CLI proxy that compresses verbose command output for LLM agents. S
 
 ## How it works
 
-token-saver sits between the agent and real CLI commands using symlinks. When `TOKEN_SAVER=1` is set, it intercepts output and returns a compressed version. When unset, it passes through to the real command unchanged.
+token-saver sits between the agent and real CLI commands using shell functions. When `TOKEN_SAVER=1` is set, the shell functions route commands through token-saver, which compresses their output. When unset, the functions aren't defined and commands run normally.
+
+Tools like Oh My Zsh, IDE integrations, and scripts use `command git` internally, which bypasses shell functions entirely — so they always talk to real git, unmodified.
 
 ```
 Agent calls "git status"
-  -> token-saver intercepts (via symlink + PATH priority)
-  -> runs real git with machine-parseable flags
+  -> shell function intercepts (only when TOKEN_SAVER=1)
+  -> token-saver runs real git with machine-parseable flags
   -> returns compressed output
 
 # Before (raw git status): ~350 tokens
@@ -52,14 +54,14 @@ bash scripts/install.sh
 
 ## Configure Claude Code
 
-Add to `~/.claude/settings.json`:
+The install script adds guarded shell functions to your profile (`~/.zshrc` or `~/.bashrc`).
+You only need to enable the `TOKEN_SAVER` env var in Claude Code's settings.
+
+Add to `~/.claude/settings.json` (inside the top-level object):
 
 ```json
-{
-  "env": {
-    "TOKEN_SAVER": "1",
-    "PATH": "/Users/<your-username>/.token-saver/bin:$PATH"
-  }
+"env": {
+  "TOKEN_SAVER": "1"
 }
 ```
 
@@ -87,4 +89,4 @@ bash scripts/install.sh
 1. Create `src/compressors/<command>/<subcommand>.rs` implementing the `Compressor` trait
 2. Register it in the parent module's dispatcher
 3. Add unit tests + integration tests
-4. Add a symlink in `scripts/install.sh` if it's a new top-level command
+4. Add the command to the function block in `scripts/install.sh`
