@@ -23,10 +23,10 @@ fn passthrough_without_env_var() {
 }
 
 #[test]
-fn passthrough_for_unknown_subcommand() {
+fn passthrough_for_skip_flags() {
     let repo = common::create_temp_repo();
 
-    // git log has no compressor — should passthrough even with TOKEN_SAVER=1
+    // git log --oneline has a compressor but --oneline is a skip flag — should passthrough
     let output = Command::new(common::binary_path())
         .args(["git", "log", "--oneline"])
         .env("TOKEN_SAVER", "1")
@@ -38,6 +38,26 @@ fn passthrough_for_unknown_subcommand() {
     assert!(
         stdout.contains("init"),
         "Expected git log output with commit message, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_for_unknown_subcommand() {
+    let repo = common::create_temp_repo();
+
+    // git shortlog has no compressor — should passthrough
+    let output = Command::new(common::binary_path())
+        .args(["git", "shortlog", "HEAD"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Test") || stdout.contains("init"),
+        "Expected git shortlog output, got: {}",
         stdout
     );
 }
