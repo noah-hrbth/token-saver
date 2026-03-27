@@ -6,6 +6,7 @@
 // #26: Factor common path prefix — when all files share a deep prefix like
 //      `src/compressors/git/`, show it once. Low-medium savings, low complexity.
 
+use super::diff_parser::{DiffFile, DiffLine, FileStatus, Hunk};
 use crate::compressors::Compressor;
 
 pub struct GitDiffCompressor;
@@ -76,43 +77,6 @@ impl Compressor for GitDiffCompressor {
 
         Some(output)
     }
-}
-
-// --- Data model ---
-
-#[derive(Debug, PartialEq)]
-enum FileStatus {
-    Normal,
-    New,
-    Deleted,
-    Renamed,
-    ModeChanged,
-    Binary,
-}
-
-#[derive(Debug)]
-struct DiffFile {
-    path: String,
-    status: FileStatus,
-    old_path: Option<String>,
-    old_mode: Option<String>,
-    new_mode: Option<String>,
-    hunks: Vec<Hunk>,
-}
-
-#[derive(Debug)]
-struct Hunk {
-    old_start: u32,
-    new_start: u32,
-    function_context: Option<String>,
-    lines: Vec<DiffLine>,
-}
-
-#[derive(Debug, PartialEq)]
-enum DiffLine {
-    Context(String),
-    Added(String),
-    Removed(String),
 }
 
 // --- Parsing ---

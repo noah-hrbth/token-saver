@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod diff_parser;
 pub mod status;
 
 use super::Compressor;
@@ -10,10 +11,7 @@ pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
         Box::new(status::GitStatusCompressor),
     ];
 
-    for compressor in compressors {
-        if compressor.can_compress(args) {
-            return Some(compressor);
-        }
-    }
-    None
+    compressors
+        .into_iter()
+        .find(|compressor| compressor.can_compress(args))
 }
