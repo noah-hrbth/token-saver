@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod git_diff;
+pub mod git_log;
 pub mod git_status;
 
 use std::path::Path;

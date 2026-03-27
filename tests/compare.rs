@@ -37,3 +37,21 @@ fn compare_git_diff() {
 
     common::print_summary(&results);
 }
+
+#[test]
+#[ignore]
+fn compare_git_log() {
+    let scenarios = common::git_log::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}

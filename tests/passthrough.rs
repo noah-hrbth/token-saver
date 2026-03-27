@@ -104,3 +104,65 @@ fn passthrough_preserves_exit_code() {
         "Expected non-zero exit for trailing whitespace check"
     );
 }
+
+#[test]
+fn passthrough_log_oneline() {
+    let repo = common::create_temp_repo();
+
+    let output = Command::new(common::binary_path())
+        .args(["git", "log", "--oneline"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("init"),
+        "Expected raw git log --oneline output, got: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("[Test]"),
+        "Should not contain compressed author format: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_log_custom_format() {
+    let repo = common::create_temp_repo();
+
+    let output = Command::new(common::binary_path())
+        .args(["git", "log", "--format=%H %s"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("init"),
+        "Expected raw git log output, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_log_graph() {
+    let repo = common::create_temp_repo();
+
+    let output = Command::new(common::binary_path())
+        .args(["git", "log", "--graph", "--oneline"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("init"),
+        "Expected raw git log --graph output, got: {}",
+        stdout
+    );
+}

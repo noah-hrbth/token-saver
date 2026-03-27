@@ -20,6 +20,7 @@ printf "${GREEN}✓ Build complete${RESET}\n\n"
 echo "Available commands with compressors:"
 echo "  1) git status"
 echo "  2) git diff"
+echo "  3) git log"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -35,9 +36,14 @@ case "$choice" in
         COMPARE_FN="compare_git_diff"
         LABEL="git diff"
         ;;
+    3|"git log"|"git-log"|"log")
+        TEST_TARGET="git_log"
+        COMPARE_FN="compare_git_log"
+        LABEL="git log"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff"
+        echo "Currently supported: git status, git diff, git log"
         exit 1
         ;;
 esac
