@@ -1,5 +1,6 @@
 pub mod diff;
 pub mod diff_parser;
+pub mod log;
 pub mod status;
 
 use super::Compressor;
@@ -8,6 +9,7 @@ use super::Compressor;
 pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
     let compressors: Vec<Box<dyn Compressor>> = vec![
         Box::new(diff::GitDiffCompressor),
+        Box::new(log::GitLogCompressor),
         Box::new(status::GitStatusCompressor),
     ];
 
