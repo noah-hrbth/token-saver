@@ -166,3 +166,67 @@ fn passthrough_log_graph() {
         stdout
     );
 }
+
+#[test]
+fn passthrough_show_blob_reference() {
+    let repo = common::create_temp_repo();
+
+    // git show HEAD:README.md should passthrough (blob reference)
+    let output = Command::new(common::binary_path())
+        .args(["git", "show", "HEAD:README.md"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("init"),
+        "Expected raw file content, got: {}",
+        stdout
+    );
+    // Should NOT contain compressed format markers
+    assert!(
+        !stdout.contains("* "),
+        "Should not contain compressed commit format: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_show_stat() {
+    let repo = common::create_temp_repo();
+
+    let output = Command::new(common::binary_path())
+        .args(["git", "show", "--stat"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("init"),
+        "Expected raw git show --stat output, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_show_name_only() {
+    let repo = common::create_temp_repo();
+
+    let output = Command::new(common::binary_path())
+        .args(["git", "show", "--name-only"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("README.md"),
+        "Expected file name in output, got: {}",
+        stdout
+    );
+}
