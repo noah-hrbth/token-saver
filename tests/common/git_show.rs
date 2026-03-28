@@ -5,13 +5,13 @@ use super::{Assertion, Scenario};
 
 /// All git show scenarios. Shared by integration tests and compare runner.
 pub fn scenarios() -> Vec<Scenario> {
-    vec\![
+    vec![
         Scenario {
             name: "Show HEAD commit (no diff)",
             command: "git",
             args: &["show", "--no-patch", "HEAD"],
             setup: setup_simple_commit,
-            assertions: vec\![
+            assertions: vec![
                 Assertion::Contains("add feature"),
                 Assertion::Contains("[Test]"),
             ],
@@ -21,7 +21,7 @@ pub fn scenarios() -> Vec<Scenario> {
             command: "git",
             args: &["show", "HEAD"],
             setup: setup_simple_commit,
-            assertions: vec\![
+            assertions: vec![
                 Assertion::Contains("add feature"),
                 Assertion::Contains("feature.rs"),
                 Assertion::Contains("+original content"),
@@ -32,7 +32,7 @@ pub fn scenarios() -> Vec<Scenario> {
             command: "git",
             args: &["show", "--no-patch", "HEAD"],
             setup: setup_commit_with_body,
-            assertions: vec\![
+            assertions: vec![
                 Assertion::Contains("commit with body"),
                 Assertion::Contains("  This is the detailed body"),
             ],
@@ -42,7 +42,7 @@ pub fn scenarios() -> Vec<Scenario> {
             command: "git",
             args: &["show", "HEAD"],
             setup: setup_multi_file_commit,
-            assertions: vec\![
+            assertions: vec![
                 Assertion::Contains("add multiple files"),
                 Assertion::Contains("files changed"),
                 Assertion::Contains("alpha.rs"),
@@ -54,7 +54,7 @@ pub fn scenarios() -> Vec<Scenario> {
             command: "git",
             args: &["show", "HEAD"],
             setup: setup_file_modification,
-            assertions: vec\![
+            assertions: vec![
                 Assertion::Contains("modify file"),
                 Assertion::Contains("feature.rs"),
                 Assertion::Contains("+modified content"),
