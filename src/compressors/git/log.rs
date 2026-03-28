@@ -1,3 +1,4 @@
+use super::commit_parser::{self, CommitFields};
 use super::diff_parser;
 use crate::compressors::Compressor;
 
@@ -136,12 +137,7 @@ impl Compressor for GitLogCompressor {
 // ---------------------------------------------------------------------------
 
 struct LogEntry {
-    hash: String,
-    decorations: Vec<String>,
-    date: String,
-    author: String,
-    subject: String,
-    body: Option<String>,
+    fields: CommitFields,
     diff: Option<Vec<diff_parser::DiffFile>>,
     stat: Option<String>,
 }
@@ -204,55 +200,11 @@ fn parse_log_entry(chunk: &str, has_patch: bool, has_stat: bool) -> Option<LogEn
         (meta_and_stat, None)
     };
 
-    // Split format fields on NUL byte
-    let fields: Vec<&str> = format_part.splitn(6, '\x00').collect();
-    if fields.len() < 6 {
-        return None;
-    }
-
-    let hash = fields[0].trim_start_matches('\n').to_string();
-    if hash.is_empty() {
-        return None;
-    }
-
-    let decorations_raw = fields[1];
-    let decorations: Vec<String> = if decorations_raw.trim().is_empty() {
-        Vec::new()
-    } else {
-        decorations_raw
-            .split(", ")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-
-    // Date: first 10 chars of ISO 8601 (YYYY-MM-DD)
-    let date_raw = fields[2];
-    let date = if date_raw.len() >= 10 {
-        date_raw[..10].to_string()
-    } else {
-        date_raw.to_string()
-    };
-
-    let author = fields[3].to_string();
-    let subject = fields[4].to_string();
-
-    let body_raw = fields[5].trim();
-    let body = if body_raw.is_empty() {
-        None
-    } else {
-        Some(body_raw.to_string())
-    };
-
+    let fields = commit_parser::parse_commit_fields(format_part)?;
     let stat_compressed = stat.map(compress_stat);
 
     Some(LogEntry {
-        hash,
-        decorations,
-        date,
-        author,
-        subject,
-        body,
+        fields,
         diff,
         stat: stat_compressed,
     })
@@ -383,23 +335,11 @@ fn format_log(entries: &[LogEntry]) -> String {
     let mut output = String::new();
 
     for entry in entries {
-        // Header line: "* {hash} ({decorations}) {date} [{author}] {subject}"
-        let dec_part = if entry.decorations.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", entry.decorations.join(", "))
-        };
-
-        output.push_str(&format!(
-            "* {}{} {} [{}] {}\n",
-            entry.hash, dec_part, entry.date, entry.author, entry.subject
-        ));
+        output.push_str(&commit_parser::format_commit_oneline(&entry.fields));
 
         // Body (indented 2 spaces)
-        if let Some(ref body) = entry.body {
-            for line in body.lines() {
-                output.push_str(&format!("  {}\n", line));
-            }
+        if let Some(ref body) = entry.fields.body {
+            output.push_str(&commit_parser::format_commit_body(body));
         }
 
         // Stat (indented 2 spaces)
@@ -427,6 +367,7 @@ fn format_log(entries: &[LogEntry]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::commit_parser::CommitFields;
     use super::*;
 
     fn args(strs: &[&str]) -> Vec<String> {
@@ -669,7 +610,7 @@ mod tests {
         );
         let entries = parse_log(&raw, false, false).unwrap();
         assert_eq!(entries.len(), 1);
-        let e = &entries[0];
+        let e = &entries[0].fields;
         assert_eq!(e.hash, "a1b2c3f");
         assert_eq!(e.decorations, vec!["HEAD -> main"]);
         assert_eq!(e.date, "2024-01-15");
@@ -699,9 +640,9 @@ mod tests {
         let raw = format!("\x01{}\x01{}", c1, c2);
         let entries = parse_log(&raw, false, false).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].subject, "First commit");
-        assert_eq!(entries[1].subject, "Second commit");
-        assert!(entries[0].decorations.is_empty());
+        assert_eq!(entries[0].fields.subject, "First commit");
+        assert_eq!(entries[1].fields.subject, "Second commit");
+        assert!(entries[0].fields.decorations.is_empty());
     }
 
     #[test]
@@ -719,7 +660,7 @@ mod tests {
             )
         );
         let entries = parse_log(&raw, false, false).unwrap();
-        assert_eq!(entries[0].body, Some(body.to_string()));
+        assert_eq!(entries[0].fields.body, Some(body.to_string()));
     }
 
     #[test]
@@ -736,7 +677,7 @@ mod tests {
             )
         );
         let entries = parse_log(&raw, false, false).unwrap();
-        assert!(entries[0].body.is_none());
+        assert!(entries[0].fields.body.is_none());
     }
 
     #[test]
@@ -754,7 +695,7 @@ mod tests {
         );
         let entries = parse_log(&raw, false, false).unwrap();
         assert_eq!(
-            entries[0].decorations,
+            entries[0].fields.decorations,
             vec!["HEAD -> main", "origin/main", "tag: v1.0"]
         );
     }
@@ -818,12 +759,14 @@ mod tests {
     #[test]
     fn format_standard_commit() {
         let entry = LogEntry {
-            hash: "a1b2c3f".to_string(),
-            decorations: vec!["HEAD -> main".to_string()],
-            date: "2024-01-15".to_string(),
-            author: "John Smith".to_string(),
-            subject: "Add auth".to_string(),
-            body: None,
+            fields: CommitFields {
+                hash: "a1b2c3f".to_string(),
+                decorations: vec!["HEAD -> main".to_string()],
+                date: "2024-01-15".to_string(),
+                author: "John Smith".to_string(),
+                subject: "Add auth".to_string(),
+                body: None,
+            },
             diff: None,
             stat: None,
         };
@@ -837,12 +780,14 @@ mod tests {
     #[test]
     fn format_commit_no_decorations() {
         let entry = LogEntry {
-            hash: "a1b2c3f".to_string(),
-            decorations: vec![],
-            date: "2024-01-15".to_string(),
-            author: "John Smith".to_string(),
-            subject: "Fix bug".to_string(),
-            body: None,
+            fields: CommitFields {
+                hash: "a1b2c3f".to_string(),
+                decorations: vec![],
+                date: "2024-01-15".to_string(),
+                author: "John Smith".to_string(),
+                subject: "Fix bug".to_string(),
+                body: None,
+            },
             diff: None,
             stat: None,
         };
@@ -854,12 +799,14 @@ mod tests {
     #[test]
     fn format_commit_with_body() {
         let entry = LogEntry {
-            hash: "a1b2c3f".to_string(),
-            decorations: vec![],
-            date: "2024-01-15".to_string(),
-            author: "Alice".to_string(),
-            subject: "Update docs".to_string(),
-            body: Some("Added README.\nFixed typos.".to_string()),
+            fields: CommitFields {
+                hash: "a1b2c3f".to_string(),
+                decorations: vec![],
+                date: "2024-01-15".to_string(),
+                author: "Alice".to_string(),
+                subject: "Update docs".to_string(),
+                body: Some("Added README.\nFixed typos.".to_string()),
+            },
             diff: None,
             stat: None,
         };
@@ -877,22 +824,26 @@ mod tests {
     #[test]
     fn format_multiple_commits() {
         let e1 = LogEntry {
-            hash: "aaa1111".to_string(),
-            decorations: vec![],
-            date: "2024-01-15".to_string(),
-            author: "Alice".to_string(),
-            subject: "First".to_string(),
-            body: None,
+            fields: CommitFields {
+                hash: "aaa1111".to_string(),
+                decorations: vec![],
+                date: "2024-01-15".to_string(),
+                author: "Alice".to_string(),
+                subject: "First".to_string(),
+                body: None,
+            },
             diff: None,
             stat: None,
         };
         let e2 = LogEntry {
-            hash: "bbb2222".to_string(),
-            decorations: vec![],
-            date: "2024-01-14".to_string(),
-            author: "Bob".to_string(),
-            subject: "Second".to_string(),
-            body: None,
+            fields: CommitFields {
+                hash: "bbb2222".to_string(),
+                decorations: vec![],
+                date: "2024-01-14".to_string(),
+                author: "Bob".to_string(),
+                subject: "Second".to_string(),
+                body: None,
+            },
             diff: None,
             stat: None,
         };

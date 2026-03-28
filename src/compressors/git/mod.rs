@@ -1,3 +1,4 @@
+pub mod commit_parser;
 pub mod diff;
 pub mod diff_parser;
 pub mod log;
