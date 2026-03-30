@@ -1,4 +1,5 @@
 pub mod git;
+pub mod ls;
 
 /// Trait for command output compressors.
 /// Each compressor knows how to parse a specific command's output
@@ -23,6 +24,7 @@ pub trait Compressor {
 pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compressor>> {
     match command {
         "git" => git::find_compressor(args),
+        "ls" => ls::find_compressor(args),
         _ => None,
     }
 }
