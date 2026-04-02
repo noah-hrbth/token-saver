@@ -127,10 +127,17 @@ impl Compressor for GitShowCompressor {
             output.push_str(&format_tag_header(&tag));
         }
 
+        let mut first_commit = true;
         for chunk in commit_chunks {
             if chunk.trim().is_empty() {
                 continue;
             }
+
+            // Blank line between consecutive commits
+            if !first_commit {
+                output.push('\n');
+            }
+            first_commit = false;
 
             // Split off diff section
             let (meta, diff_files): (&str, Option<Vec<diff_parser::DiffFile>>) =
@@ -154,15 +161,13 @@ impl Compressor for GitShowCompressor {
                 output.push_str(&commit_parser::format_commit_body(body));
             }
 
-            // Stat summary only for multi-file diffs
-            if let Some(ref files) = diff_files {
-                if files.len() >= 2 {
-                    output.push_str(&format!("  {}\n", diff_parser::stat_summary(files)));
-                }
-            }
-
+            // Stat summary + diff
             if let Some(ref files) = diff_files {
                 output.push('\n');
+                if files.len() >= 2 {
+                    output.push_str(&diff_parser::stat_summary(files));
+                    output.push_str("\n\n");
+                }
                 for file in files {
                     output.push_str(&diff_parser::format_file(file));
                 }

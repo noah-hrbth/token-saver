@@ -76,6 +76,9 @@ struct LsEntry {
     name: String,
 }
 
+/// Parse one line of `ls -la` output into an `LsEntry`.
+/// Assumes the standard 9-field layout: perms links owner group size month day time name.
+/// This matches both BSD (macOS) and GNU (Linux) `ls -la` output.
 fn parse_ls_line(line: &str) -> Option<LsEntry> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 9 {
@@ -291,6 +294,18 @@ lrwxr-xr-x  1 noah  staff    11 Mar 28 09:00 link -> target
             result,
             Some("Cargo.toml (1.2K)\nsrc/\nrun.sh* (8K)\nlink -> target\n.env (52B)".to_string())
         );
+    }
+
+    #[test]
+    fn compress_unparseable_line_is_skipped() {
+        let input = "\
+total 8
+drwxr-xr-x  4 noah  staff  128 Mar 30 10:00 .
+drwxr-xr-x 10 noah  staff  320 Mar 30 09:00 ..
+this is not a valid ls line
+-rw-r--r--  1 noah  staff  52 Mar 30 09:50 file.txt\n";
+        let result = compress(input);
+        assert_eq!(result, Some("file.txt (52B)".to_string()));
     }
 
     #[test]

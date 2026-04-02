@@ -82,7 +82,7 @@ pub fn format_commit_body(body: &str) -> String {
 /// Extract the date portion (first 10 characters) from an ISO 8601 timestamp.
 ///
 /// Returns the full string unchanged when it is shorter than 10 characters.
-pub fn parse_date(iso: &str) -> String {
+fn parse_date(iso: &str) -> String {
     if iso.len() >= 10 {
         iso[..10].to_string()
     } else {
@@ -94,7 +94,7 @@ pub fn parse_date(iso: &str) -> String {
 ///
 /// Returns an empty `Vec` when the input is blank.  Each token is trimmed of
 /// surrounding whitespace and empty tokens are dropped.
-pub fn parse_decorations(raw: &str) -> Vec<String> {
+fn parse_decorations(raw: &str) -> Vec<String> {
     if raw.trim().is_empty() {
         return Vec::new();
     }

@@ -1,4 +1,7 @@
 {
+  "env": {
+    "TOKEN_SAVER": "1"
+  },
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true
   },
