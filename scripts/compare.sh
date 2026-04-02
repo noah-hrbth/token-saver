@@ -21,6 +21,8 @@ echo "Available commands with compressors:"
 echo "  1) git status"
 echo "  2) git diff"
 echo "  3) git log"
+echo "  4) git show"
+echo "  5) ls"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -41,9 +43,19 @@ case "$choice" in
         COMPARE_FN="compare_git_log"
         LABEL="git log"
         ;;
+    4|"git show"|"git-show"|"show")
+        TEST_TARGET="git_show"
+        COMPARE_FN="compare_git_show"
+        LABEL="git show"
+        ;;
+    5|"ls")
+        TEST_TARGET="ls"
+        COMPARE_FN="compare_ls"
+        LABEL="ls"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff, git log"
+        echo "Currently supported: git status, git diff, git log, git show, ls"
         exit 1
         ;;
 esac
