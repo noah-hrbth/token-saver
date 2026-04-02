@@ -4,6 +4,7 @@ pub mod git_diff;
 pub mod git_log;
 pub mod git_show;
 pub mod git_status;
+pub mod ls;
 
 use std::path::Path;
 use std::process::Command;
