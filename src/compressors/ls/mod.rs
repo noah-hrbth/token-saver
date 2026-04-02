@@ -22,8 +22,23 @@ impl Compressor for LsCompressor {
         has_l
     }
 
-    fn normalized_args(&self, _original_args: &[String]) -> Vec<String> {
-        todo!()
+    fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
+        let mut paths: Vec<String> = Vec::new();
+        let mut after_double_dash = false;
+
+        for arg in original_args {
+            if after_double_dash {
+                paths.push(arg.clone());
+            } else if arg == "--" {
+                after_double_dash = true;
+            } else if !arg.starts_with('-') {
+                paths.push(arg.clone());
+            }
+        }
+
+        let mut result = vec!["-la".to_string(), "--".to_string()];
+        result.extend(paths);
+        result
     }
 
     fn compress(&self, _stdout: &str, _stderr: &str, _exit_code: i32) -> Option<String> {
@@ -94,5 +109,35 @@ mod tests {
         let c = LsCompressor;
         assert!(!c.can_compress(&["-lR".into()]));
         assert!(!c.can_compress(&["-l".into(), "-R".into()]));
+    }
+
+    #[test]
+    fn normalized_args_bare_l() {
+        let c = LsCompressor;
+        assert_eq!(c.normalized_args(&["-l".into()]), vec!["-la", "--"]);
+    }
+
+    #[test]
+    fn normalized_args_strips_extra_flags() {
+        let c = LsCompressor;
+        assert_eq!(c.normalized_args(&["-lh".into()]), vec!["-la", "--"]);
+    }
+
+    #[test]
+    fn normalized_args_preserves_paths() {
+        let c = LsCompressor;
+        assert_eq!(
+            c.normalized_args(&["-la".into(), "src".into(), "tests".into()]),
+            vec!["-la", "--", "src", "tests"]
+        );
+    }
+
+    #[test]
+    fn normalized_args_path_after_double_dash() {
+        let c = LsCompressor;
+        assert_eq!(
+            c.normalized_args(&["-l".into(), "--".into(), "-weird-name".into()]),
+            vec!["-la", "--", "-weird-name"]
+        );
     }
 }
