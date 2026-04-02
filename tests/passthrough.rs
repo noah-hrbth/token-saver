@@ -230,3 +230,72 @@ fn passthrough_show_name_only() {
         stdout
     );
 }
+
+#[test]
+fn passthrough_bare_ls() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "hello").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["ls"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("file.txt"),
+        "Expected raw ls output, got: {}",
+        stdout
+    );
+    // Should NOT have compressed format (no size in parens)
+    assert!(
+        !stdout.contains("("),
+        "Bare ls should passthrough without compression: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_ls_recursive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("sub")).unwrap();
+    fs::write(dir.path().join("sub/nested.txt"), "hi").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["ls", "-lR"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // -R should passthrough, showing subdirectory contents
+    assert!(
+        stdout.contains("sub") && stdout.contains("nested.txt"),
+        "Expected recursive ls output, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn passthrough_ls_without_env() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "hello").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["ls", "-la"])
+        .env_remove("TOKEN_SAVER")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Without TOKEN_SAVER, should get raw ls -la output with permissions
+    assert!(
+        stdout.contains("drw") || stdout.contains("-rw"),
+        "Expected raw ls -la output with permissions, got: {}",
+        stdout
+    );
+}

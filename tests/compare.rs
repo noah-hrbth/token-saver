@@ -73,3 +73,21 @@ fn compare_git_show() {
 
     common::print_summary(&results);
 }
+
+#[test]
+#[ignore]
+fn compare_ls() {
+    let scenarios = common::ls::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
