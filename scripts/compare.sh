@@ -23,6 +23,7 @@ echo "  2) git diff"
 echo "  3) git log"
 echo "  4) git show"
 echo "  5) ls"
+echo "  6) find"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -53,9 +54,14 @@ case "$choice" in
         COMPARE_FN="compare_ls"
         LABEL="ls"
         ;;
+    6|"find")
+        TEST_TARGET="find"
+        COMPARE_FN="compare_find"
+        LABEL="find"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff, git log, git show, ls"
+        echo "Currently supported: git status, git diff, git log, git show, ls, find"
         exit 1
         ;;
 esac

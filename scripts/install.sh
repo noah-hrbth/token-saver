@@ -17,7 +17,7 @@ cp target/release/token-saver "$INSTALL_DIR/token-saver"
 chmod +x "$INSTALL_DIR/token-saver"
 
 # Clean up legacy symlinks from older installs
-COMMANDS=(git ls)
+COMMANDS=(git ls find)
 for cmd in "${COMMANDS[@]}"; do
     if [ -L "$INSTALL_DIR/$cmd" ]; then
         rm -f "$INSTALL_DIR/$cmd"
@@ -36,6 +36,7 @@ HOOK_BLOCK='# token-saver: wrap commands for LLM output compression
 if [ "$TOKEN_SAVER" = "1" ]; then
     git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
     ls() { "$HOME/.token-saver/bin/token-saver" ls "$@"; }
+    find() { "$HOME/.token-saver/bin/token-saver" find "$@"; }
 fi'
 
 add_shell_hook() {

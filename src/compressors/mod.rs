@@ -1,3 +1,4 @@
+pub mod find;
 pub mod git;
 pub mod ls;
 
@@ -23,6 +24,7 @@ pub trait Compressor {
 /// Returns None if no compressor is registered for this command/args combo.
 pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compressor>> {
     match command {
+        "find" => find::find_compressor(args),
         "git" => git::find_compressor(args),
         "ls" => ls::find_compressor(args),
         _ => None,
