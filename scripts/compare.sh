@@ -11,6 +11,21 @@ RESET='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ── Helper: format cargo test output ─────────────────────────────────────────
+format_test_output() {
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^test\ (.*)\ \.\.\.\ ok$ ]]; then
+            printf "${GREEN}  ✓ ${BASH_REMATCH[1]}${RESET}\n"
+        elif [[ "$line" =~ ^test\ (.*)\ \.\.\.\ FAILED$ ]]; then
+            printf "${RED}  ✗ ${BASH_REMATCH[1]}${RESET}\n"
+        elif [[ "$line" == "test result:"* ]]; then
+            : # skip
+        else
+            printf "%s\n" "$line"
+        fi
+    done
+}
+
 # ── Build ────────────────────────────────────────────────────────────────────
 printf "${BOLD}Building token-saver...${RESET}\n"
 cargo build --manifest-path="$PROJECT_DIR/Cargo.toml" 2>&1 | tail -1
@@ -24,6 +39,7 @@ echo "  3) git log"
 echo "  4) git show"
 echo "  5) ls"
 echo "  6) find"
+echo "  7) grep"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -59,9 +75,14 @@ case "$choice" in
         COMPARE_FN="compare_find"
         LABEL="find"
         ;;
+    7|"grep"|"rg")
+        TEST_TARGET="grep"
+        COMPARE_FN="compare_grep"
+        LABEL="grep / rg"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff, git log, git show, ls, find"
+        echo "Currently supported: git status, git diff, git log, git show, ls, find, grep"
         exit 1
         ;;
 esac
@@ -72,7 +93,7 @@ printf "\n${BOLD}Testing: %s${RESET}\n\n" "$LABEL"
 printf "${BOLD}${CYAN}▸ Integration tests${RESET}\n"
 printf "${DIM}  cargo test --test %s${RESET}\n\n" "$TEST_TARGET"
 
-if cargo test --manifest-path="$PROJECT_DIR/Cargo.toml" --test "$TEST_TARGET" 2>&1; then
+if cargo test --manifest-path="$PROJECT_DIR/Cargo.toml" --test "$TEST_TARGET" 2>&1 | format_test_output; then
     printf "\n${GREEN}✓ All integration tests passed${RESET}\n"
 else
     printf "\n${RED}✗ Some integration tests failed${RESET}\n"
@@ -82,4 +103,4 @@ fi
 printf "\n${BOLD}${CYAN}▸ Token comparison${RESET}\n"
 printf "${DIM}  cargo test --test compare %s -- --ignored --nocapture${RESET}\n" "$COMPARE_FN"
 
-cargo test --manifest-path="$PROJECT_DIR/Cargo.toml" --test compare "$COMPARE_FN" -- --ignored --nocapture 2>&1
+cargo test --manifest-path="$PROJECT_DIR/Cargo.toml" --test compare "$COMPARE_FN" -- --ignored --nocapture 2>&1 | format_test_output

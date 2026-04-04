@@ -1,5 +1,7 @@
+pub mod filters;
 pub mod find;
 pub mod git;
+pub mod grep;
 pub mod ls;
 
 /// Trait for command output compressors.
@@ -26,7 +28,9 @@ pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compres
     match command {
         "find" => find::find_compressor(args),
         "git" => git::find_compressor(args),
+        "grep" => grep::find_grep_compressor(args),
         "ls" => ls::find_compressor(args),
+        "rg" => grep::find_rg_compressor(args),
         _ => None,
     }
 }

@@ -299,3 +299,23 @@ fn passthrough_ls_without_env() {
         stdout
     );
 }
+
+#[test]
+fn passthrough_grep_list_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "hello world\n").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["grep", "-l", "hello", "file.txt"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("file.txt"),
+        "Expected grep output with filename, got: {}",
+        stdout
+    );
+}

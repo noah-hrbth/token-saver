@@ -12,9 +12,9 @@ Tracking which command compressors are implemented and which are planned.
 - [x] `git show` — compact commit + diff, tag header support
 - [x] `ls -l` — type indicators + human-readable sizes, no metadata noise
 - [x] `find` — noise filtering (.git, __pycache__, .DS_Store, *.pyc), tree-style output, 500-entry cap
+- [x] `grep` / `rg` — group matches by file, deduplicate path prefixes, right-align line numbers, 200-match cap
 
 ## Planned
 
 - [ ] `git blame` — group consecutive lines by commit, deduplicate metadata
-- [ ] `grep` / `rg` — compress repeated path prefixes, reduce context noise
 - [ ] `git branch` — compact branch list with tracking info

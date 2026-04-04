@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::compressors::Compressor;
+use crate::compressors::filters::should_filter;
 
 /// Skip flags: if any of these appear in args, we don't compress.
 const SKIP_FLAGS: &[&str] = &[
@@ -111,35 +112,6 @@ fn has_child_in_sorted(prefix: &str, sorted: &[String]) -> bool {
     let probe = format!("{}/", prefix);
     let idx = sorted.partition_point(|p| p.as_str() < probe.as_str());
     sorted.get(idx).is_some_and(|p| p.starts_with(&probe))
-}
-
-/// Returns true if the path should be filtered out.
-fn should_filter(path: &str) -> bool {
-    if path == ".git"
-        || path.starts_with(".git/")
-        || path.contains("/.git/")
-        || path.ends_with("/.git")
-    {
-        return true;
-    }
-
-    if path == "__pycache__"
-        || path.starts_with("__pycache__/")
-        || path.contains("/__pycache__/")
-        || path.ends_with("/__pycache__")
-    {
-        return true;
-    }
-
-    if path == ".DS_Store" || path.ends_with("/.DS_Store") {
-        return true;
-    }
-
-    if path.ends_with(".pyc") {
-        return true;
-    }
-
-    false
 }
 
 /// A node in the path tree.
