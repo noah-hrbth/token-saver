@@ -13,8 +13,8 @@ Tracking which command compressors are implemented and which are planned.
 - [x] `ls -l` — type indicators + human-readable sizes, no metadata noise
 - [x] `find` — noise filtering (.git, __pycache__, .DS_Store, *.pyc), tree-style output, 500-entry cap
 - [x] `grep` / `rg` — group matches by file, deduplicate path prefixes, right-align line numbers, 200-match cap
+- [x] `git branch` — compact branch list with tracking info, 50-branch cap
 
 ## Planned
 
 - [ ] `git blame` — group consecutive lines by commit, deduplicate metadata
-- [ ] `git branch` — compact branch list with tracking info
