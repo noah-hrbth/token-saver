@@ -17,7 +17,7 @@ cp target/release/token-saver "$INSTALL_DIR/token-saver"
 chmod +x "$INSTALL_DIR/token-saver"
 
 # Clean up legacy symlinks from older installs
-COMMANDS=(git ls find grep rg)
+COMMANDS=(cat git ls find grep rg)
 for cmd in "${COMMANDS[@]}"; do
     if [ -L "$INSTALL_DIR/$cmd" ]; then
         rm -f "$INSTALL_DIR/$cmd"
@@ -34,6 +34,7 @@ done
 #   This guarantees no external tool ever sees compressed output.
 HOOK_BLOCK='# token-saver: wrap commands for LLM output compression
 if [ "$TOKEN_SAVER" = "1" ]; then
+    cat() { "$HOME/.token-saver/bin/token-saver" cat "$@"; }
     git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
     ls() { "$HOME/.token-saver/bin/token-saver" ls "$@"; }
     find() { "$HOME/.token-saver/bin/token-saver" find "$@"; }

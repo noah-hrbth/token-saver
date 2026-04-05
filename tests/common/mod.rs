@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod cat;
 pub mod find;
 pub mod git_branch;
 pub mod git_diff;

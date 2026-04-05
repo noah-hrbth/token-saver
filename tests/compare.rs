@@ -130,6 +130,24 @@ fn compare_find() {
 
 #[test]
 #[ignore]
+fn compare_cat() {
+    let scenarios = common::cat::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
 fn compare_grep() {
     let scenarios = common::grep::scenarios();
     let mut results = Vec::new();
