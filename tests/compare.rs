@@ -219,3 +219,31 @@ fn compare_prettier() {
 
     common::print_summary(&results);
 }
+
+#[test]
+#[ignore]
+fn compare_npx_prettier() {
+    if !std::process::Command::new("npx")
+        .args(["prettier", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping npx prettier compare: npx prettier not available");
+        return;
+    }
+
+    let scenarios = common::prettier::npx_scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}

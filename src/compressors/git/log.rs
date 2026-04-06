@@ -201,7 +201,7 @@ fn parse_log_entry(chunk: &str, has_patch: bool, has_stat: bool) -> Option<LogEn
     };
 
     let fields = commit_parser::parse_commit_fields(format_part)?;
-    let stat_compressed = stat.map(compress_stat);
+    let stat_compressed = stat.map(diff_parser::compress_stat);
 
     Some(LogEntry {
         fields,
@@ -264,62 +264,6 @@ fn split_stat(text: &str) -> (&str, Option<&str>) {
     let stat_part = &text[stat_text_start..];
 
     (format_part, Some(stat_part))
-}
-
-/// Compress raw git stat output.
-///
-/// Replaces `++++----` bar notation with `N+ N-` counts.
-/// Summary lines (`N files changed, ...`) pass through unchanged.
-fn compress_stat(raw: &str) -> String {
-    let mut output = String::new();
-
-    for line in raw.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // Summary line: "N file(s) changed, ..."
-        if line.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
-            output.push_str(line.trim());
-            output.push('\n');
-            continue;
-        }
-
-        // File stat line: " src/foo.rs | 15 ++++++------"
-        if let Some(pipe_idx) = line.find(" | ") {
-            let filename = line[..pipe_idx].trim();
-            let after_pipe = line[pipe_idx + 3..].trim();
-
-            // after_pipe looks like "15 +++------" or "3 +++" or "5 -----"
-            let bar_start = after_pipe.find(['+', '-']);
-            let bar = match bar_start {
-                Some(idx) => &after_pipe[idx..],
-                None => {
-                    // No bar (binary or zero changes) — pass through trimmed
-                    output.push_str(&format!("{} | {}\n", filename, after_pipe));
-                    continue;
-                }
-            };
-
-            let insertions = bar.chars().filter(|&c| c == '+').count();
-            let deletions = bar.chars().filter(|&c| c == '-').count();
-
-            let counts = match (insertions, deletions) {
-                (0, 0) => String::new(),
-                (ins, 0) => format!("{}+", ins),
-                (0, del) => format!("{}-", del),
-                (ins, del) => format!("{}+ {}-", ins, del),
-            };
-
-            output.push_str(&format!("{} | {}\n", filename, counts));
-        } else {
-            // Unknown line format — pass through
-            output.push_str(line.trim());
-            output.push('\n');
-        }
-    }
-
-    output
 }
 
 // ---------------------------------------------------------------------------
@@ -713,45 +657,15 @@ mod tests {
         assert!(parse_log(raw, false, false).is_none());
     }
 
-    // --- Task 7: compress_stat ---
+    // --- Task 7: compress_stat (moved to diff_parser, tested there) ---
 
     #[test]
-    fn compress_stat_single_file() {
-        let raw = " src/main.rs | 3 +++\n 1 file changed, 3 insertions(+)\n";
-        let result = compress_stat(raw);
-        assert!(result.contains("src/main.rs | 3+"));
-        assert!(result.contains("1 file changed, 3 insertions(+)"));
-    }
-
-    #[test]
-    fn compress_stat_mixed_changes() {
-        let raw =
-            " src/auth.rs | 15 +++++++++------\n 1 file changed, 9 insertions(+), 6 deletions(-)\n";
-        let result = compress_stat(raw);
-        assert!(result.contains("src/auth.rs | 9+ 6-"));
-    }
-
-    #[test]
-    fn compress_stat_deletions_only() {
-        let raw = " src/old.rs | 5 -----\n 1 file changed, 5 deletions(-)\n";
-        let result = compress_stat(raw);
-        assert!(result.contains("src/old.rs | 5-"));
-    }
-
-    #[test]
-    fn compress_stat_multiple_files() {
+    fn compress_stat_integration() {
         let raw = " src/a.rs | 3 +++\n src/b.rs | 2 --\n 2 files changed, 3 insertions(+), 2 deletions(-)\n";
-        let result = compress_stat(raw);
+        let result = diff_parser::compress_stat(raw);
         assert!(result.contains("src/a.rs | 3+"));
         assert!(result.contains("src/b.rs | 2-"));
         assert!(result.contains("2 files changed"));
-    }
-
-    #[test]
-    fn compress_stat_summary_passthrough() {
-        let raw = "2 files changed, 10 insertions(+), 5 deletions(-)\n";
-        let result = compress_stat(raw);
-        assert!(result.contains("2 files changed, 10 insertions(+), 5 deletions(-)"));
     }
 
     // --- Task 8: format_log and compress ---

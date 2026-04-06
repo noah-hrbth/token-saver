@@ -179,8 +179,12 @@ fn compress_check(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> 
         }
     }
 
-    if exit_code == 0 && unformatted.is_empty() && errors.is_empty() {
-        return Some("All matched files use Prettier code style!".to_string());
+    if unformatted.is_empty() && errors.is_empty() {
+        if exit_code == 0 {
+            return Some("All matched files use Prettier code style!".to_string());
+        }
+        // Non-zero exit with no recognized content → passthrough
+        return None;
     }
 
     let total_files = unformatted.len();
@@ -246,6 +250,11 @@ fn compress_write(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> 
             // (e.g. "src/a.ts 47ms"). Count these as formatted files.
             formatted_count += 1;
         }
+    }
+
+    // Non-zero exit with no recognized [error] lines → unexpected failure, passthrough
+    if exit_code != 0 && errors.is_empty() {
+        return None;
     }
 
     if formatted_count == 0 && errors.is_empty() {
@@ -615,6 +624,12 @@ mod tests {
     }
 
     #[test]
+    fn test_check_unrecognized_error_returns_none() {
+        let stderr = "npm error code EPERM\nnpm error Your cache folder contains root-owned files";
+        assert_eq!(check("", stderr, 1), None);
+    }
+
+    #[test]
     fn test_check_exit_2() {
         assert_eq!(check("", "", 2), None);
     }
@@ -724,6 +739,12 @@ mod tests {
             "got: {}",
             result
         );
+    }
+
+    #[test]
+    fn test_write_unrecognized_error_returns_none() {
+        let stderr = "npm error code EPERM\nnpm error something went wrong";
+        assert_eq!(write_mode("", stderr, 1), None);
     }
 
     #[test]

@@ -44,26 +44,6 @@ fn compressed_multiple_files() {
 }
 
 #[test]
-fn passthrough_diff_stat() {
-    let repo = common::create_temp_repo();
-    std::fs::write(repo.path().join("README.md"), "changed").unwrap();
-
-    let raw = std::process::Command::new("git")
-        .args(["diff", "--stat"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-
-    let compressed = std::process::Command::new(common::binary_path())
-        .args(["git", "diff", "--stat"])
-        .env("TOKEN_SAVER", "1")
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-
-    assert_eq!(
-        String::from_utf8_lossy(&raw.stdout),
-        String::from_utf8_lossy(&compressed.stdout),
-        "Skip flag --stat should passthrough unchanged"
-    );
+fn compressed_diff_stat() {
+    common::run_test(&common::git_diff::scenarios()[6]);
 }

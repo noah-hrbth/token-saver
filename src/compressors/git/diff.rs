@@ -6,13 +6,12 @@
 // #26: Factor common path prefix — when all files share a deep prefix like
 //      `src/compressors/git/`, show it once. Low-medium savings, low complexity.
 
-use super::diff_parser::{format_file, parse_diff, stat_summary};
+use super::diff_parser::{compress_stat, format_file, parse_diff, stat_summary};
 use crate::compressors::Compressor;
 
 pub struct GitDiffCompressor;
 
 const SKIP_FLAGS: &[&str] = &[
-    "--stat",
     "--name-only",
     "--name-status",
     "--raw",
@@ -27,6 +26,13 @@ const SKIP_FLAGS: &[&str] = &[
     "--ext-diff",
 ];
 
+/// Returns true if `--stat` or `--stat=<width>` is in the args (but not `--shortstat`).
+fn has_stat_flag(args: &[String]) -> bool {
+    args[1..]
+        .iter()
+        .any(|a| a == "--stat" || a.starts_with("--stat="))
+}
+
 impl Compressor for GitDiffCompressor {
     /// Returns true when the first arg is exactly "diff" (not diff-tree, etc.)
     /// and no skip flags are present in the remaining args.
@@ -40,6 +46,23 @@ impl Compressor for GitDiffCompressor {
     }
 
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
+        let has_patch = original_args[1..]
+            .iter()
+            .any(|a| a == "--patch" || a == "-p");
+
+        if has_stat_flag(original_args) && !has_patch {
+            // Stat-only mode: preserve --stat and other flags, just strip color
+            let mut result = vec!["diff".to_string(), "--no-color".to_string()];
+            for arg in &original_args[1..] {
+                if arg == "--color" || arg.starts_with("--color=") {
+                    continue;
+                }
+                result.push(arg.clone());
+            }
+            return result;
+        }
+
+        // Unified diff mode
         let mut result = vec![
             "diff".to_string(),
             "--unified=1".to_string(),
@@ -57,6 +80,11 @@ impl Compressor for GitDiffCompressor {
         }
         if stdout.trim().is_empty() {
             return Some(String::new());
+        }
+
+        // Stat output: contains " | " bars but no unified diff markers
+        if !stdout.contains("diff --git ") && stdout.contains(" | ") {
+            return Some(compress_stat(stdout));
         }
 
         let files = parse_diff(stdout);
@@ -117,8 +145,13 @@ mod tests {
     // --- skip flags ---
 
     #[test]
-    fn skip_diff_stat() {
-        assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--stat"])));
+    fn can_compress_diff_stat() {
+        assert!(GitDiffCompressor.can_compress(&args(&["diff", "--stat"])));
+    }
+
+    #[test]
+    fn can_compress_diff_stat_with_width() {
+        assert!(GitDiffCompressor.can_compress(&args(&["diff", "--stat=80"])));
     }
 
     #[test]
@@ -380,6 +413,91 @@ mod tests {
             "Should not be collapsed:\n{}",
             result
         );
+    }
+
+    // --- stat mode tests ---
+
+    #[test]
+    fn normalized_args_stat_patch_combo_uses_unified_mode() {
+        let args: Vec<String> = vec![
+            "diff".into(),
+            "--stat".into(),
+            "--patch".into(),
+            "HEAD".into(),
+        ];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+                "--stat",
+                "--patch",
+                "HEAD",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_args_stat_short_patch_combo_uses_unified_mode() {
+        let args: Vec<String> = vec!["diff".into(), "--stat".into(), "-p".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(
+            result,
+            vec![
+                "diff",
+                "--unified=1",
+                "--diff-algorithm=histogram",
+                "--no-ext-diff",
+                "--no-color",
+                "--stat",
+                "-p",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_args_stat_mode() {
+        let args: Vec<String> = vec!["diff".into(), "--stat".into(), "HEAD".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec!["diff", "--no-color", "--stat", "HEAD"]);
+    }
+
+    #[test]
+    fn normalized_args_stat_strips_color() {
+        let args: Vec<String> = vec!["diff".into(), "--stat".into(), "--color=always".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec!["diff", "--no-color", "--stat"]);
+    }
+
+    #[test]
+    fn normalized_args_stat_with_width() {
+        let args: Vec<String> = vec!["diff".into(), "--stat=80".into()];
+        let result = GitDiffCompressor.normalized_args(&args);
+        assert_eq!(result, vec!["diff", "--no-color", "--stat=80"]);
+    }
+
+    #[test]
+    fn compress_stat_output() {
+        let input = " src/main.rs | 10 ++++++----\n src/lib.rs  |  3 +++\n 2 files changed, 9 insertions(+), 4 deletions(-)\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("src/main.rs | 6+ 4-"), "got: {}", result);
+        assert!(result.contains("src/lib.rs | 3+"), "got: {}", result);
+        assert!(
+            result.contains("2 files changed"),
+            "summary preserved; got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn compress_stat_single_file() {
+        let input = " README.md | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(result.contains("README.md | 1+ 1-"), "got: {}", result);
     }
 
     // --- error handling tests ---

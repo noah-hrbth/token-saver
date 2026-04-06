@@ -66,6 +66,69 @@ pub fn scenarios() -> Vec<Scenario> {
     ]
 }
 
+/// Same scenarios routed through `npx prettier` instead of bare `prettier`.
+pub fn npx_scenarios() -> Vec<Scenario> {
+    vec![
+        Scenario {
+            name: "npx prettier --check single file",
+            command: "npx",
+            args: &["prettier", "--check", "src/"],
+            setup: setup_unformatted,
+            assertions: vec![
+                Assertion::Contains("  ugly.js"),
+                Assertion::Contains("needs formatting"),
+                Assertion::NotContains("Checking formatting"),
+                Assertion::NotContains("[warn]"),
+                Assertion::NotContains("Code style issues"),
+            ],
+        },
+        Scenario {
+            name: "npx prettier --check many files",
+            command: "npx",
+            args: &["prettier", "--check", "src/"],
+            setup: setup_many_unformatted,
+            assertions: vec![
+                Assertion::Contains("files need formatting"),
+                Assertion::NotContains("[warn]"),
+                Assertion::NotContains("Checking formatting"),
+                Assertion::NotContains("Code style issues"),
+            ],
+        },
+        Scenario {
+            name: "npx prettier --check nested dirs",
+            command: "npx",
+            args: &["prettier", "--check", "src/"],
+            setup: setup_nested_unformatted,
+            assertions: vec![
+                Assertion::Contains("src/components/"),
+                Assertion::Contains("src/utils/"),
+                Assertion::Contains("files need formatting"),
+                Assertion::NotContains("[warn]"),
+            ],
+        },
+        Scenario {
+            name: "npx prettier --check clean project",
+            command: "npx",
+            args: &["prettier", "--check", "src/clean.js"],
+            setup: setup_clean,
+            assertions: vec![
+                Assertion::NotContains("[warn]"),
+                Assertion::NotContains("needs formatting"),
+            ],
+        },
+        Scenario {
+            name: "npx prettier --write many files",
+            command: "npx",
+            args: &["prettier", "--write", "src/"],
+            setup: setup_many_unformatted,
+            assertions: vec![
+                Assertion::NotContains("[warn]"),
+                Assertion::NotContains("Checking formatting"),
+            ],
+        },
+    ]
+}
+
 /// Unformatted JS content with obvious formatting violations.
 const UGLY_JS: &str = "const   x   =   1\nconst y   =    'hello'\nif(true){console.log(x,y)}\nfunction   foo(  a,b,c  ){return    a+b+c}\nconst   arr=[1,2,3,4,5].map(  (x)  =>  x*2  )\n";
 

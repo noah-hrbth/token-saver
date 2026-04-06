@@ -314,6 +314,63 @@ pub fn stat_summary(files: &[DiffFile]) -> String {
     format!("{}, {}, {}", files_part, ins_part, del_part)
 }
 
+/// Compress raw git stat output.
+///
+/// Replaces `++++----` bar notation with `N+ N-` counts.
+/// Summary lines (`N files changed, ...`) pass through unchanged.
+pub fn compress_stat(raw: &str) -> String {
+    let mut output = String::new();
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Summary line: "N file(s) changed, ..."
+        if line.trim_start().starts_with(|c: char| c.is_ascii_digit())
+            && (line.contains("file changed") || line.contains("files changed"))
+        {
+            output.push_str(line.trim());
+            output.push('\n');
+            continue;
+        }
+
+        // File stat line: " src/foo.rs | 15 ++++++------"
+        if let Some(pipe_idx) = line.find(" | ") {
+            let filename = line[..pipe_idx].trim();
+            let after_pipe = line[pipe_idx + 3..].trim();
+
+            // after_pipe looks like "15 +++------" or "3 +++" or "5 -----"
+            let bar_start = after_pipe.find(['+', '-']);
+            let bar = match bar_start {
+                Some(idx) => &after_pipe[idx..],
+                None => {
+                    // No bar (binary or zero changes) — pass through trimmed
+                    output.push_str(&format!("{} | {}\n", filename, after_pipe));
+                    continue;
+                }
+            };
+
+            let insertions = bar.chars().filter(|&c| c == '+').count();
+            let deletions = bar.chars().filter(|&c| c == '-').count();
+
+            let counts = match (insertions, deletions) {
+                (ins, 0) => format!("{}+", ins),
+                (0, del) => format!("{}-", del),
+                (ins, del) => format!("{}+ {}-", ins, del),
+            };
+
+            output.push_str(&format!("{} | {}\n", filename, counts));
+        } else {
+            // Unknown line format — pass through
+            output.push_str(line.trim());
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
