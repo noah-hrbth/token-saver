@@ -15,6 +15,8 @@ Tracking which command compressors are implemented and which are planned.
 - [x] `grep` / `rg` — group matches by file, deduplicate path prefixes, right-align line numbers, 200-match cap
 - [x] `git branch` — compact branch list with tracking info, 50-branch cap
 - [x] `cat` — binary detection, minified line collapsing (>2000 chars), 1000-line cap with truncation footer
+- [x] `eslint` / `npx eslint` — JSON-based parsing, group by file, errors before warnings, per-file + total caps (50/200), fatal error separation, fixable count summary
+- [x] `prettier` / `npx prettier` — `--check` file list + count, `--write` summary, bare stdout passthrough
 
 ## Planned
 
@@ -27,7 +29,7 @@ Tracking which command compressors are implemented and which are planned.
 ### JavaScript / TypeScript
 
 - [ ] `tsc --noEmit` / `npx tsc` — group errors by file, dedupe paths, strip redundant location info
-- [ ] `eslint` — group by file, count warnings vs errors, collapse fixable violations
+- [x] `eslint` — group by file, count warnings vs errors, collapse fixable violations
 - [ ] `jest` / `vitest` — summary only (X passed, Y failed), list only failures with context
 - [ ] `npm install` / `yarn` / `pnpm install` — strip progress/fetch noise, show: added N, removed N, warnings
 - [ ] `npm ls` — flatten dependency tree, show only top-level + flagged duplicates

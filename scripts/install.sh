@@ -17,7 +17,7 @@ cp target/release/token-saver "$INSTALL_DIR/token-saver"
 chmod +x "$INSTALL_DIR/token-saver"
 
 # Clean up legacy symlinks from older installs
-COMMANDS=(cat git ls find grep rg)
+COMMANDS=(cat eslint git ls find grep npx prettier rg)
 for cmd in "${COMMANDS[@]}"; do
     if [ -L "$INSTALL_DIR/$cmd" ]; then
         rm -f "$INSTALL_DIR/$cmd"
@@ -32,13 +32,23 @@ done
 #   shell functions and goes straight to PATH lookup → real git.
 #   Only interactive user/agent calls go through the function → token-saver.
 #   This guarantees no external tool ever sees compressed output.
+#
+# Why .zshenv (not .zshrc) for zsh:
+#   Claude Code's Bash tool runs commands in a non-interactive zsh subshell.
+#   Non-interactive zsh sources .zshenv but NOT .zshrc, so functions in .zshrc
+#   are never defined for agent tool calls. .zshenv is sourced for all zsh
+#   instances. The TOKEN_SAVER=1 guard inside the block keeps it a no-op
+#   in normal (non-agent) contexts.
 HOOK_BLOCK='# token-saver: wrap commands for LLM output compression
 if [ "$TOKEN_SAVER" = "1" ]; then
     cat() { "$HOME/.token-saver/bin/token-saver" cat "$@"; }
+    eslint() { "$HOME/.token-saver/bin/token-saver" eslint "$@"; }
     git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
     ls() { "$HOME/.token-saver/bin/token-saver" ls "$@"; }
     find() { "$HOME/.token-saver/bin/token-saver" find "$@"; }
     grep() { "$HOME/.token-saver/bin/token-saver" grep "$@"; }
+    npx() { "$HOME/.token-saver/bin/token-saver" npx "$@"; }
+    prettier() { "$HOME/.token-saver/bin/token-saver" prettier "$@"; }
     rg() { "$HOME/.token-saver/bin/token-saver" rg "$@"; }
 fi'
 
@@ -65,7 +75,7 @@ echo ""
 echo "Configuring shell profile..."
 SHELL_NAME="$(basename "$SHELL")"
 case "$SHELL_NAME" in
-    zsh)  add_shell_hook "$HOME/.zshrc" ;;
+    zsh)  add_shell_hook "$HOME/.zshenv" ;;
     bash) add_shell_hook "$HOME/.bashrc" ;;
     *)    echo "  Unknown shell ($SHELL_NAME) — add this to your profile manually:"
           echo "    $HOOK_BLOCK" ;;
@@ -82,5 +92,5 @@ echo '    "TOKEN_SAVER": "1"'
 echo '  }'
 echo ""
 echo "To test manually:"
-echo "  source ~/.zshrc  # or ~/.bashrc"
+echo "  source ~/.zshenv  # or ~/.bashrc"
 echo "  TOKEN_SAVER=1 git status"

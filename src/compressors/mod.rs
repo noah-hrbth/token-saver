@@ -1,9 +1,12 @@
 pub mod cat;
+pub mod eslint;
 pub mod filters;
 pub mod find;
 pub mod git;
 pub mod grep;
 pub mod ls;
+pub mod npx;
+pub mod prettier;
 
 /// Trait for command output compressors.
 /// Each compressor knows how to parse a specific command's output
@@ -28,10 +31,13 @@ pub trait Compressor {
 pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compressor>> {
     match command {
         "cat" => cat::find_compressor(args),
+        "eslint" => eslint::find_compressor(args),
         "find" => find::find_compressor(args),
         "git" => git::find_compressor(args),
         "grep" => grep::find_grep_compressor(args),
         "ls" => ls::find_compressor(args),
+        "npx" => npx::find_compressor(args),
+        "prettier" => prettier::find_compressor(args),
         "rg" => grep::find_rg_compressor(args),
         _ => None,
     }

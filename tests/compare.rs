@@ -163,3 +163,59 @@ fn compare_grep() {
 
     common::print_summary(&results);
 }
+
+#[test]
+#[ignore]
+fn compare_eslint() {
+    if !std::process::Command::new("eslint")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping eslint compare: eslint not found in PATH");
+        return;
+    }
+
+    let scenarios = common::eslint::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
+fn compare_prettier() {
+    if !std::process::Command::new("prettier")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping prettier compare: prettier not found in PATH");
+        return;
+    }
+
+    let scenarios = common::prettier::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}

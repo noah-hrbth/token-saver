@@ -62,5 +62,5 @@ Dispatch chain: `find_compressor(command, args)` → `git::find_compressor(args)
 
 - **Shell functions, not PATH manipulation**: `scripts/install.sh` installs guarded shell functions (only active when `TOKEN_SAVER=1`). Tools using `command git` bypass the function and hit real git — this is intentional and critical for compatibility with Oh My Zsh, IDE integrations, etc.
 - **Graceful fallback**: if compression fails or returns `None`, token-saver re-execs with the original args. The agent never sees an error from token-saver itself.
-- **Zero dependencies at runtime**: `Cargo.toml` has no `[dependencies]`. Only dev-dependencies (`tempfile`, `tiktoken-rs`) are used for testing.
+- **Minimal dependencies at runtime**: `serde` and `serde_json` for JSON-based compressors (eslint). Dev-dependencies (`tempfile`, `tiktoken-rs`) are used for testing.
 - **Rust edition 2024**.

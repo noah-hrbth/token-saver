@@ -42,6 +42,8 @@ echo "  6) find"
 echo "  7) grep"
 echo "  8) git branch"
 echo "  9) cat"
+echo " 10) eslint"
+echo " 11) prettier"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -92,9 +94,19 @@ case "$choice" in
         COMPARE_FN="compare_cat"
         LABEL="cat"
         ;;
+    10|"eslint")
+        TEST_TARGET="eslint"
+        COMPARE_FN="compare_eslint"
+        LABEL="eslint"
+        ;;
+    11|"prettier")
+        TEST_TARGET="prettier"
+        COMPARE_FN="compare_prettier"
+        LABEL="prettier"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff, git log, git show, ls, find, grep, git branch, cat"
+        echo "Currently supported: git status, git diff, git log, git show, ls, find, grep, git branch, cat, eslint, prettier"
         exit 1
         ;;
 esac

@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod cat;
+pub mod eslint;
 pub mod find;
 pub mod git_branch;
 pub mod git_diff;
@@ -9,6 +10,7 @@ pub mod git_show;
 pub mod git_status;
 pub mod grep;
 pub mod ls;
+pub mod prettier;
 
 use std::path::Path;
 use std::process::Command;
@@ -71,6 +73,12 @@ pub struct Scenario {
 
 /// Run a scenario with TOKEN_SAVER=1 and verify assertions.
 pub fn run_test(scenario: &Scenario) {
+    run_test_with_exit_codes(scenario, &[0]);
+}
+
+/// Like `run_test`, but accepts any of the given exit codes as success.
+/// Useful for commands like eslint that return 1 when lint problems are found.
+pub fn run_test_with_exit_codes(scenario: &Scenario, expected: &[i32]) {
     let repo = create_temp_repo();
     (scenario.setup)(repo.path());
 
@@ -86,12 +94,14 @@ pub fn run_test(scenario: &Scenario) {
         .unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let exit_code = output.status.code().unwrap_or(-1);
 
     assert!(
-        output.status.success(),
-        "Scenario '{}': expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
+        expected.contains(&exit_code),
+        "Scenario '{}': expected exit code in {:?}, got {}\nstdout: {}\nstderr: {}",
         scenario.name,
-        output.status,
+        expected,
+        exit_code,
         stdout,
         String::from_utf8_lossy(&output.stderr),
     );
@@ -136,7 +146,17 @@ pub fn run_compare(scenario: &Scenario) -> (usize, usize) {
         .current_dir(repo.path())
         .output()
         .unwrap();
-    let raw_stdout = String::from_utf8_lossy(&raw.stdout).to_string();
+    // Combine stdout+stderr for raw output — agents see both streams.
+    // Some commands (e.g. prettier) write diagnostics to stderr.
+    let raw_out = String::from_utf8_lossy(&raw.stdout);
+    let raw_err = String::from_utf8_lossy(&raw.stderr);
+    let raw_stdout = if raw_err.is_empty() {
+        raw_out.to_string()
+    } else if raw_out.is_empty() {
+        raw_err.to_string()
+    } else {
+        format!("{}\n{}", raw_out.trim_end(), raw_err)
+    };
 
     let comp = Command::new(binary_path())
         .args(&args)
