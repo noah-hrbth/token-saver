@@ -17,7 +17,7 @@ cp target/release/token-saver "$INSTALL_DIR/token-saver"
 chmod +x "$INSTALL_DIR/token-saver"
 
 # Clean up legacy symlinks from older installs
-COMMANDS=(cat eslint git ls find grep npx prettier rg)
+COMMANDS=(cat eslint git jest ls find grep npx prettier rg)
 for cmd in "${COMMANDS[@]}"; do
     if [ -L "$INSTALL_DIR/$cmd" ]; then
         rm -f "$INSTALL_DIR/$cmd"
@@ -44,6 +44,7 @@ if [ "$TOKEN_SAVER" = "1" ]; then
     cat() { "$HOME/.token-saver/bin/token-saver" cat "$@"; }
     eslint() { "$HOME/.token-saver/bin/token-saver" eslint "$@"; }
     git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
+    jest() { "$HOME/.token-saver/bin/token-saver" jest "$@"; }
     ls() { "$HOME/.token-saver/bin/token-saver" ls "$@"; }
     find() { "$HOME/.token-saver/bin/token-saver" find "$@"; }
     grep() { "$HOME/.token-saver/bin/token-saver" grep "$@"; }

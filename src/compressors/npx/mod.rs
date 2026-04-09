@@ -1,5 +1,6 @@
 use crate::compressors::Compressor;
 use crate::compressors::eslint;
+use crate::compressors::jest;
 use crate::compressors::prettier;
 
 /// Boolean npx flags (no value follows).
@@ -148,6 +149,7 @@ pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
             }
             Box::new(eslint::EslintCompressor)
         }
+        "jest" => jest::find_compressor(&cmd_args)?,
         "prettier" => prettier::find_compressor(&cmd_args)?,
         _ => return None,
     };

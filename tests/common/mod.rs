@@ -9,6 +9,7 @@ pub mod git_log;
 pub mod git_show;
 pub mod git_status;
 pub mod grep;
+pub mod jest;
 pub mod ls;
 pub mod prettier;
 

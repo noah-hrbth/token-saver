@@ -166,6 +166,62 @@ fn compare_grep() {
 
 #[test]
 #[ignore]
+fn compare_jest() {
+    if !std::process::Command::new("jest")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping jest compare: jest not found in PATH (use compare_npx_jest instead)");
+        return;
+    }
+
+    let scenarios = common::jest::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
+fn compare_npx_jest() {
+    if !std::process::Command::new("npx")
+        .args(["jest", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping npx jest compare: npx jest not available");
+        return;
+    }
+
+    let scenarios = common::jest::npx_scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
 fn compare_eslint() {
     if !std::process::Command::new("eslint")
         .arg("--version")

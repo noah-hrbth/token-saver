@@ -45,6 +45,8 @@ echo "  9) cat"
 echo " 10) eslint"
 echo " 11) prettier"
 echo " 12) npx prettier"
+echo " 13) jest"
+echo " 14) npx jest"
 echo
 read -rp "Enter command to test (or number): " choice
 
@@ -110,9 +112,19 @@ case "$choice" in
         COMPARE_FN="compare_npx_prettier"
         LABEL="npx prettier"
         ;;
+    13|"jest")
+        TEST_TARGET="jest"
+        COMPARE_FN="compare_jest"
+        LABEL="jest"
+        ;;
+    14|"npx jest"|"npx-jest")
+        TEST_TARGET="jest"
+        COMPARE_FN="compare_npx_jest"
+        LABEL="npx jest"
+        ;;
     *)
         echo "Unknown command: $choice"
-        echo "Currently supported: git status, git diff, git log, git show, ls, find, grep, git branch, cat, eslint, prettier, npx prettier"
+        echo "Currently supported: git status, git diff, git log, git show, ls, find, grep, git branch, cat, eslint, prettier, npx prettier, jest, npx jest"
         exit 1
         ;;
 esac

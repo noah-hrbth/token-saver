@@ -4,6 +4,7 @@ pub mod filters;
 pub mod find;
 pub mod git;
 pub mod grep;
+pub mod jest;
 pub mod ls;
 pub mod npx;
 pub mod prettier;
@@ -35,6 +36,7 @@ pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compres
         "find" => find::find_compressor(args),
         "git" => git::find_compressor(args),
         "grep" => grep::find_grep_compressor(args),
+        "jest" => jest::find_compressor(args),
         "ls" => ls::find_compressor(args),
         "npx" => npx::find_compressor(args),
         "prettier" => prettier::find_compressor(args),
