@@ -278,6 +278,52 @@ fn compare_prettier() {
 
 #[test]
 #[ignore]
+fn compare_tsc() {
+    if !common::tsc::is_available() {
+        eprintln!("Skipping tsc compare: neither tsc nor npm found");
+        return;
+    }
+
+    let scenarios = common::tsc::scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
+fn compare_npx_tsc() {
+    if !common::tsc::is_available() {
+        eprintln!("Skipping npx tsc compare: neither tsc nor npm found");
+        return;
+    }
+
+    let scenarios = common::tsc::npx_scenarios();
+    let mut results = Vec::new();
+
+    for scenario in &scenarios {
+        let (raw, comp) = common::run_compare(scenario);
+        results.push(ScenarioResult {
+            name: scenario.name.to_string(),
+            raw_tokens: raw,
+            compressed_tokens: comp,
+        });
+    }
+
+    common::print_summary(&results);
+}
+
+#[test]
+#[ignore]
 fn compare_npx_prettier() {
     if !std::process::Command::new("npx")
         .args(["prettier", "--version"])

@@ -12,6 +12,7 @@ pub mod grep;
 pub mod jest;
 pub mod ls;
 pub mod prettier;
+pub mod tsc;
 
 use std::path::Path;
 use std::process::Command;
@@ -87,12 +88,20 @@ pub fn run_test_with_exit_codes(scenario: &Scenario, expected: &[i32]) {
         .chain(scenario.args.iter().copied())
         .collect();
 
-    let output = Command::new(binary_path())
-        .args(&args)
+    let mut cmd = Command::new(binary_path());
+    cmd.args(&args)
         .env("TOKEN_SAVER", "1")
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+        .current_dir(repo.path());
+
+    // If setup installed local node_modules (e.g. for tsc), expose them on PATH
+    // so token-saver's runner can find the binary without a global install.
+    let node_bin = repo.path().join("node_modules").join(".bin");
+    if node_bin.exists() {
+        let base = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{}:{}", node_bin.display(), base));
+    }
+
+    let output = cmd.output().unwrap();
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let exit_code = output.status.code().unwrap_or(-1);
@@ -141,12 +150,26 @@ pub fn run_compare(scenario: &Scenario) -> (usize, usize) {
         .chain(scenario.args.iter().copied())
         .collect();
 
-    let raw = Command::new(binary_path())
+    // If setup installed local node_modules (e.g. for tsc), expose them on PATH
+    // so token-saver's runner can find the binary without a global install.
+    let node_bin = repo.path().join("node_modules").join(".bin");
+    let path_override: Option<String> = if node_bin.exists() {
+        let base = std::env::var("PATH").unwrap_or_default();
+        Some(format!("{}:{}", node_bin.display(), base))
+    } else {
+        None
+    };
+
+    let mut raw_cmd = Command::new(binary_path());
+    raw_cmd
         .args(&args)
         .env_remove("TOKEN_SAVER")
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+        .current_dir(repo.path());
+    if let Some(ref p) = path_override {
+        raw_cmd.env("PATH", p);
+    }
+    let raw = raw_cmd.output().unwrap();
+
     // Combine stdout+stderr for raw output — agents see both streams.
     // Some commands (e.g. prettier) write diagnostics to stderr.
     let raw_out = String::from_utf8_lossy(&raw.stdout);
@@ -159,12 +182,15 @@ pub fn run_compare(scenario: &Scenario) -> (usize, usize) {
         format!("{}\n{}", raw_out.trim_end(), raw_err)
     };
 
-    let comp = Command::new(binary_path())
+    let mut comp_cmd = Command::new(binary_path());
+    comp_cmd
         .args(&args)
         .env("TOKEN_SAVER", "1")
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+        .current_dir(repo.path());
+    if let Some(ref p) = path_override {
+        comp_cmd.env("PATH", p);
+    }
+    let comp = comp_cmd.output().unwrap();
     let comp_stdout = String::from_utf8_lossy(&comp.stdout).to_string();
 
     let raw_tokens = estimate_tokens(&raw_stdout);

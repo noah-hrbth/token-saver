@@ -142,11 +142,11 @@ fn parse_branches(output: &str) -> Option<String> {
     }
 
     // Pin current branch to first position
-    if let Some(pos) = local.iter().position(|b| b.is_current) {
-        if pos > 0 {
-            let current = local.remove(pos);
-            local.insert(0, current);
-        }
+    if let Some(pos) = local.iter().position(|b| b.is_current)
+        && pos > 0
+    {
+        let current = local.remove(pos);
+        local.insert(0, current);
     }
 
     let total = local.len() + remote.len();

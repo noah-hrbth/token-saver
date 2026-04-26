@@ -2,6 +2,7 @@ use crate::compressors::Compressor;
 use crate::compressors::eslint;
 use crate::compressors::jest;
 use crate::compressors::prettier;
+use crate::compressors::tsc;
 
 /// Boolean npx flags (no value follows).
 const NPX_BOOL_FLAGS: &[&str] = &["--yes", "-y", "--no", "-n", "--quiet", "-q"];
@@ -151,6 +152,7 @@ pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
         }
         "jest" => jest::find_compressor(&cmd_args)?,
         "prettier" => prettier::find_compressor(&cmd_args)?,
+        "tsc" => tsc::find_compressor(&cmd_args)?,
         _ => return None,
     };
     Some(Box::new(NpxCompressor {
@@ -277,7 +279,19 @@ mod tests {
 
     #[test]
     fn find_compressor_unknown_command() {
-        let result = find_compressor(&args(&["tsc", "src/"]));
+        let result = find_compressor(&args(&["webpack"]));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_npx_tsc_basic() {
+        let result = find_compressor(&args(&["tsc"]));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn find_npx_tsc_with_watch() {
+        let result = find_compressor(&args(&["tsc", "--watch"]));
         assert!(result.is_none());
     }
 

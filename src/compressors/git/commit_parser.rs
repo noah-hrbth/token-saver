@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn parse_commit_fields_strips_leading_newline_from_hash() {
-        let raw = format!("\na1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00");
+        let raw = "\na1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00".to_string();
         let f = parse_commit_fields(&raw).unwrap();
         assert_eq!(f.hash, "a1b2c3f");
     }

@@ -71,10 +71,10 @@ fn parse_file_chunk(chunk: &str) -> DiffFile {
     let mut hunk_start_idx = None;
 
     // First line is "a/path b/path" — extract path from b/ side
-    if let Some(first) = lines.first() {
-        if let Some(b_part) = first.split(" b/").last() {
-            path = b_part.to_string();
-        }
+    if let Some(first) = lines.first()
+        && let Some(b_part) = first.split(" b/").last()
+    {
+        path = b_part.to_string();
     }
 
     for (idx, line) in lines.iter().enumerate() {

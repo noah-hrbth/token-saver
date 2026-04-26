@@ -8,6 +8,7 @@ pub mod jest;
 pub mod ls;
 pub mod npx;
 pub mod prettier;
+pub mod tsc;
 
 /// Trait for command output compressors.
 /// Each compressor knows how to parse a specific command's output
@@ -41,6 +42,7 @@ pub fn find_compressor(command: &str, args: &[String]) -> Option<Box<dyn Compres
         "npx" => npx::find_compressor(args),
         "prettier" => prettier::find_compressor(args),
         "rg" => grep::find_rg_compressor(args),
+        "tsc" => tsc::find_compressor(args),
         _ => None,
     }
 }

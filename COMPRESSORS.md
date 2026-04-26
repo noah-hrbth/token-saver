@@ -18,6 +18,7 @@ Tracking which command compressors are implemented and which are planned.
 - [x] `eslint` / `npx eslint` — JSON-based parsing, group by file, errors before warnings, per-file + total caps (50/200), fatal error separation, fixable count summary
 - [x] `prettier` / `npx prettier` — `--check` file list + count, `--write` summary, bare stdout passthrough
 - [x] `jest` / `npx jest` — JSON-based parsing, failures grouped by suite with error truncation (15-line cap), per-suite (10) + total (20) failure caps, directory-grouped suite list, optional coverage table, summary with skipped counts
+- [x] `tsc` / `npx tsc` — text parsing (no JSON mode), group by file, CONFIG: section for global errors, per-file + total caps (30/100), chain continuations preserved; deduplicates same-code+message errors (comma-joined locations), hoists uniform error code to file header, inlines single-error files, strips trailing periods
 
 ## Planned
 
@@ -29,8 +30,6 @@ Tracking which command compressors are implemented and which are planned.
 
 ### JavaScript / TypeScript
 
-- [ ] `tsc --noEmit` / `npx tsc` — group errors by file, dedupe paths, strip redundant location info
-- [x] `eslint` — group by file, count warnings vs errors, collapse fixable violations
 - [ ] `vitest` — summary only (X passed, Y failed), list only failures with context
 - [ ] `npm install` / `yarn` / `pnpm install` — strip progress/fetch noise, show: added N, removed N, warnings
 - [ ] `npm ls` — flatten dependency tree, show only top-level + flagged duplicates

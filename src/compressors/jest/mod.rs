@@ -267,12 +267,10 @@ fn compress_jest_with_cwd(
     }
 
     // ── Coverage table ────────────────────────────────────────────────────────
-    if has_coverage {
-        if let Some(coverage_map) = &result.coverage_map {
-            let table = render_coverage_table(coverage_map, &cwd);
-            if !table.is_empty() {
-                parts.push(format!("coverage:\n{}", table));
-            }
+    if has_coverage && let Some(coverage_map) = &result.coverage_map {
+        let table = render_coverage_table(coverage_map, &cwd);
+        if !table.is_empty() {
+            parts.push(format!("coverage:\n{}", table));
         }
     }
 
@@ -285,10 +283,10 @@ fn compress_jest_with_cwd(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn relativize_path(absolute: &str, cwd: &Option<String>) -> String {
-    if let Some(prefix) = cwd {
-        if let Some(stripped) = absolute.strip_prefix(prefix.as_str()) {
-            return stripped.to_string();
-        }
+    if let Some(prefix) = cwd
+        && let Some(stripped) = absolute.strip_prefix(prefix.as_str())
+    {
+        return stripped.to_string();
     }
     absolute.to_string()
 }
@@ -629,6 +627,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_jest_json(
         success: bool,
         passed_tests: u64,

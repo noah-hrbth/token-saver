@@ -796,9 +796,9 @@ mod tests {
         let chunks: String = (0..20)
             .map(|i| {
                 format!(
-                    "\x01{:07x}\x00\x00{}\x00Author{}\x00Subject {}\x00",
+                    "\x01{:07x}\x00\x002024-01-{:02}T10:00:00+00:00\x00Author{}\x00Subject {}\x00",
                     i,
-                    format!("2024-01-{:02}T10:00:00+00:00", (i % 28) + 1),
+                    (i % 28) + 1,
                     i,
                     i
                 )
@@ -817,9 +817,9 @@ mod tests {
         let chunks: String = (0..5)
             .map(|i| {
                 format!(
-                    "\x01{:07x}\x00\x00{}\x00Author{}\x00Subject {}\x00",
+                    "\x01{:07x}\x00\x002024-01-{:02}T10:00:00+00:00\x00Author{}\x00Subject {}\x00",
                     i,
-                    format!("2024-01-{:02}T10:00:00+00:00", i + 1),
+                    i + 1,
                     i,
                     i
                 )

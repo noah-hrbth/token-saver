@@ -56,7 +56,7 @@ impl Compressor for FindCompressor {
 
         // Step 4: cap at 500
         let total = paths.len();
-        let remainder_count = if total > 500 { total - 500 } else { 0 };
+        let remainder_count = total.saturating_sub(500);
         paths.truncate(500);
 
         // Step 5: pre-pass to tag implicit directories.

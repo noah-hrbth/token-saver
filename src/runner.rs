@@ -10,12 +10,11 @@ pub fn find_real_binary(command_name: &str, skip_dir: &Path) -> Option<PathBuf> 
 
     for dir in env::split_paths(&path_var) {
         // Skip our own bin directory
-        if let Some(ref skip) = skip_canonical {
-            if let Ok(canonical) = dir.canonicalize() {
-                if &canonical == skip {
-                    continue;
-                }
-            }
+        if let Some(ref skip) = skip_canonical
+            && let Ok(canonical) = dir.canonicalize()
+            && &canonical == skip
+        {
+            continue;
         }
 
         let candidate = dir.join(command_name);

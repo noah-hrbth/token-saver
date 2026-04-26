@@ -200,10 +200,10 @@ fn compress_eslint_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -
 }
 
 fn relativize_path(absolute: &str, cwd: &Option<String>) -> String {
-    if let Some(prefix) = cwd {
-        if let Some(stripped) = absolute.strip_prefix(prefix.as_str()) {
-            return stripped.to_string();
-        }
+    if let Some(prefix) = cwd
+        && let Some(stripped) = absolute.strip_prefix(prefix.as_str())
+    {
+        return stripped.to_string();
     }
     absolute.to_string()
 }
