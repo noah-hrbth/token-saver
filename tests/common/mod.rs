@@ -28,7 +28,7 @@ pub fn create_temp_repo() -> tempfile::TempDir {
     let path = dir.path();
 
     Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(path)
         .output()
         .unwrap();
