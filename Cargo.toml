@@ -2,6 +2,15 @@
 name = "token-saver"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Transparent CLI proxy that compresses verbose command output for LLM agents."
+license = "MIT"
+repository = "https://github.com/noah-hrbth/token-saver"
+homepage = "https://github.com/noah-hrbth/token-saver"
+readme = "README.md"
+authors = ["Noah Harborth"]
+keywords = ["llm", "cli", "claude", "agent", "compression"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -10,3 +19,7 @@ serde_json = "1"
 [dev-dependencies]
 tempfile = "3"
 tiktoken-rs = "0.6"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

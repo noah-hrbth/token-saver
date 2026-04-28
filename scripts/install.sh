@@ -25,7 +25,7 @@ for cmd in "${COMMANDS[@]}"; do
     fi
 done
 
-# Add shell functions to profile (guarded by TOKEN_SAVER env var).
+# Add shell init to profile.
 #
 # Why functions instead of PATH symlinks:
 #   Tools like Oh My Zsh call `command git` internally, which bypasses
@@ -39,48 +39,46 @@ done
 #   are never defined for agent tool calls. .zshenv is sourced for all zsh
 #   instances. The TOKEN_SAVER=1 guard inside the block keeps it a no-op
 #   in normal (non-agent) contexts.
-HOOK_BLOCK='# token-saver: wrap commands for LLM output compression
-if [ "$TOKEN_SAVER" = "1" ]; then
-    cat() { "$HOME/.token-saver/bin/token-saver" cat "$@"; }
-    eslint() { "$HOME/.token-saver/bin/token-saver" eslint "$@"; }
-    git() { "$HOME/.token-saver/bin/token-saver" git "$@"; }
-    jest() { "$HOME/.token-saver/bin/token-saver" jest "$@"; }
-    ls() { "$HOME/.token-saver/bin/token-saver" ls "$@"; }
-    find() { "$HOME/.token-saver/bin/token-saver" find "$@"; }
-    grep() { "$HOME/.token-saver/bin/token-saver" grep "$@"; }
-    npx() { "$HOME/.token-saver/bin/token-saver" npx "$@"; }
-    prettier() { "$HOME/.token-saver/bin/token-saver" prettier "$@"; }
-    rg() { "$HOME/.token-saver/bin/token-saver" rg "$@"; }
-    tsc() { "$HOME/.token-saver/bin/token-saver" tsc "$@"; }
-fi'
 
 add_shell_hook() {
     local profile="$1"
+    local shell_name="$2"
+
     # Remove legacy PATH hook from older installs
     if [ -f "$profile" ] && grep -qF 'token-saver/bin:$PATH' "$profile"; then
-        # Remove the old PATH-based hook lines
         sed -i.bak '/# token-saver: prepend wrapper/d; /token-saver\/bin:\$PATH/d' "$profile"
         rm -f "${profile}.bak"
         echo "  Removed legacy PATH hook from $profile"
     fi
-    if [ -f "$profile" ] && grep -qF 'token-saver' "$profile"; then
+
+    # Remove legacy inlined HOOK_BLOCK from older installs
+    if [ -f "$profile" ] && grep -qF '$HOME/.token-saver/bin/token-saver' "$profile"; then
+        sed -i.bak '/# token-saver: wrap commands/,/^fi$/d' "$profile"
+        rm -f "${profile}.bak"
+        echo "  Removed legacy shell function block from $profile"
+    fi
+
+    # Skip if init line already present
+    if [ -f "$profile" ] && grep -qF 'token-saver init' "$profile"; then
         echo "  Shell hook already in $profile — skipping"
         return
     fi
+
     # Create profile if it doesn't exist
     touch "$profile"
-    printf '\n%s\n' "$HOOK_BLOCK" >> "$profile"
-    echo "  Added shell functions to $profile"
+    printf '\nexport PATH="$HOME/.token-saver/bin:$PATH"\neval "$(token-saver init %s)"\n' "$shell_name" >> "$profile"
+    echo "  Added shell init to $profile"
 }
 
 echo ""
 echo "Configuring shell profile..."
 SHELL_NAME="$(basename "$SHELL")"
 case "$SHELL_NAME" in
-    zsh)  add_shell_hook "$HOME/.zshenv" ;;
-    bash) add_shell_hook "$HOME/.bashrc" ;;
+    zsh)  add_shell_hook "$HOME/.zshenv" "zsh" ;;
+    bash) add_shell_hook "$HOME/.bashrc" "bash" ;;
     *)    echo "  Unknown shell ($SHELL_NAME) — add this to your profile manually:"
-          echo "    $HOOK_BLOCK" ;;
+          echo "    export PATH=\"\$HOME/.token-saver/bin:\$PATH\""
+          echo "    eval \"\$(token-saver init $SHELL_NAME)\"" ;;
 esac
 
 echo ""

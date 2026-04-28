@@ -1,4 +1,5 @@
 mod compressors;
+mod init;
 mod runner;
 
 use std::env;
@@ -19,6 +20,37 @@ fn main() {
         .to_string();
 
     let (command, command_args) = if binary_name == "token-saver" {
+        match args.get(1).map(String::as_str) {
+            Some("--version") | Some("-V") => {
+                println!("token-saver {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            Some("--help") | Some("-h") => {
+                println!("token-saver {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "Transparent CLI proxy that compresses verbose command output for LLM agents."
+                );
+                println!();
+                println!("USAGE:");
+                println!(
+                    "    token-saver <command> [args...]    Run command with compression (when TOKEN_SAVER=1)"
+                );
+                println!(
+                    "    token-saver init <shell>           Print shell-function block (zsh|bash)"
+                );
+                println!("    token-saver --version              Print version");
+                println!();
+                println!("Add to your shell profile:");
+                println!("    eval \"$(token-saver init zsh)\"     # in ~/.zshenv");
+                println!("    eval \"$(token-saver init bash)\"    # in ~/.bashrc");
+                return;
+            }
+            Some("init") => {
+                let shell = args.get(2).map(String::as_str).unwrap_or("");
+                process::exit(init::print(shell));
+            }
+            _ => {}
+        }
         // Direct invocation: token-saver git status
         if args.len() < 2 {
             eprintln!("Usage: token-saver <command> [args...]");
