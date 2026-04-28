@@ -162,7 +162,7 @@ fn compress_eslint_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -
 
         if !normals.is_empty() {
             let mut sorted = normals;
-            sorted.sort_by(|a, b| b.severity.cmp(&a.severity));
+            sorted.sort_by_key(|m| std::cmp::Reverse(m.severity));
 
             let problems: Vec<Problem> = sorted
                 .iter()
