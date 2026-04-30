@@ -59,9 +59,16 @@ git add "$FORMULA"
 git commit -m "token-saver ${VERSION}"
 git push origin "$BRANCH"
 
-GH_TOKEN="$TAP_TOKEN" gh pr create \
+export GH_TOKEN="$TAP_TOKEN"
+
+gh pr create \
     -R "$TAP_REPO" \
     --title "token-saver ${VERSION}" \
     --body "Automated bump to ${TAG}." \
     --base main \
     --head "$BRANCH"
+
+gh pr merge "$BRANCH" \
+    -R "$TAP_REPO" \
+    --squash \
+    --delete-branch
