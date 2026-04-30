@@ -9,33 +9,22 @@ token-saver is a transparent CLI proxy that compresses verbose command output fo
 ```sh
 brew tap noah-hrbth/token-saver
 brew install token-saver
+token-saver init
 ```
 
-Then add the shell wrappers to your startup file.
+`token-saver init` auto-detects your shell (zsh or bash), appends the eval line to your shell profile, and adds `"TOKEN_SAVER": "1"` to `~/.claude/settings.json` (creating the file if needed). It is idempotent — re-running is safe.
 
-**zsh** — add to `~/.zshenv` (not `~/.zshrc`; see note below):
+After `init`, reload your shell:
 
 ```sh
-echo 'eval "$(token-saver init zsh)"' >> ~/.zshenv
-```
-
-**bash** — add to `~/.bashrc`:
-
-```sh
-echo 'eval "$(token-saver init bash)"' >> ~/.bashrc
-```
-
-Then enable compression in your AI tool. For Claude Code, add to `~/.claude/settings.json`:
-
-```json
-{
-  "env": {
-    "TOKEN_SAVER": "1"
-  }
-}
+source ~/.zshenv   # or ~/.bashrc for bash
 ```
 
 The shell wrappers are guarded by `TOKEN_SAVER=1` — they are a no-op in normal interactive shells.
+
+#### Manual setup (if you prefer)
+
+If you'd rather wire things up yourself, `token-saver init zsh` (or `init bash`) prints just the shell-function block — pipe it through `eval` from your profile, and add `TOKEN_SAVER=1` to your AI tool's environment.
 
 ### Why `~/.zshenv` and not `~/.zshrc`
 
@@ -60,7 +49,7 @@ Or via cargo (installs to `~/.cargo/bin`):
 
 ```sh
 cargo install --path .
-echo 'eval "$(token-saver init zsh)"' >> ~/.zshenv   # or ~/.bashrc for bash
+token-saver init
 ```
 
 ## License

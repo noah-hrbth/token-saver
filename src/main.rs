@@ -36,18 +36,20 @@ fn main() {
                     "    token-saver <command> [args...]    Run command with compression (when TOKEN_SAVER=1)"
                 );
                 println!(
+                    "    token-saver init                   Auto-configure shell profile + Claude Code settings.json"
+                );
+                println!(
                     "    token-saver init <shell>           Print shell-function block (zsh|bash)"
                 );
                 println!("    token-saver --version              Print version");
                 println!();
-                println!("Add to your shell profile:");
-                println!("    eval \"$(token-saver init zsh)\"     # in ~/.zshenv");
-                println!("    eval \"$(token-saver init bash)\"    # in ~/.bashrc");
+                println!("First-time setup (Homebrew or cargo install):");
+                println!("    token-saver init                   # one-shot setup");
                 return;
             }
             Some("init") => {
-                let shell = args.get(2).map(String::as_str).unwrap_or("");
-                process::exit(init::print(shell));
+                let init_args: Vec<String> = args.iter().skip(2).cloned().collect();
+                process::exit(init::run(&init_args));
             }
             _ => {}
         }
