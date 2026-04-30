@@ -2,7 +2,6 @@
 set -euo pipefail
 
 TAG="${TAG:?TAG env var required (e.g. v0.1.0)}"
-GH_TOKEN="${GH_TOKEN:?GH_TOKEN env var required (set HOMBREWTOKENSAVER secret in repo settings)}"
 VERSION="${TAG#v}"
 SOURCE_REPO="noah-hrbth/token-saver"
 TAP_REPO="noah-hrbth/homebrew-token-saver"
