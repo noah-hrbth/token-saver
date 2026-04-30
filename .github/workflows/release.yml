@@ -12,9 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: gh release create ${{ github.ref_name }} --generate-notes --title ${{ github.ref_name }}
+      - name: Create GitHub release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --generate-notes --title "$TAG"
 
   upload-assets:
     needs: create-release
@@ -41,7 +43,7 @@ jobs:
           archive: $bin-$target
           tar: unix
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
 
   bump-tap:
     needs: upload-assets
@@ -50,6 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Update tap formula
         env:
-          GH_TOKEN: ${{ secrets.HOMBREWTOKENSAVER }}
+          GH_TOKEN: ${{ github.token }}
+          TAP_TOKEN: ${{ secrets.HOMEBREWTOKENSAVER }}
           TAG: ${{ github.ref_name }}
         run: bash scripts/update-tap.sh

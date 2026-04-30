@@ -2,6 +2,8 @@
 set -euo pipefail
 
 TAG="${TAG:?TAG env var required (e.g. v0.1.0)}"
+: "${GH_TOKEN:?GH_TOKEN env var required (auto-provided by GitHub Actions; used for source-repo reads)}"
+: "${TAP_TOKEN:?TAP_TOKEN env var required (PAT with contents:write + pull-requests:write on the tap repo)}"
 VERSION="${TAG#v}"
 SOURCE_REPO="noah-hrbth/token-saver"
 TAP_REPO="noah-hrbth/homebrew-token-saver"
@@ -21,7 +23,7 @@ SHA_LINUX_X86_64=$(fetch_sha x86_64-unknown-linux-gnu)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" "$WORK"
+git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" "$WORK"
 cd "$WORK"
 
 BRANCH="bump-${VERSION}"
@@ -57,7 +59,7 @@ git add "$FORMULA"
 git commit -m "token-saver ${VERSION}"
 git push origin "$BRANCH"
 
-gh pr create \
+GH_TOKEN="$TAP_TOKEN" gh pr create \
     -R "$TAP_REPO" \
     --title "token-saver ${VERSION}" \
     --body "Automated bump to ${TAG}." \
