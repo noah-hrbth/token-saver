@@ -13,20 +13,69 @@ const COMMANDS: &[&str] = &[
 /// - `init` (no args): auto-detect shell, edit profile, edit `~/.claude/settings.json`.
 /// - `init zsh|bash`: print the shell-function block (for `eval "$(...)"` use).
 pub fn run(args: &[String]) -> i32 {
+    let binary = current_binary_path();
     match args.first().map(String::as_str) {
-        None => auto(),
-        Some(shell) => print_block(shell),
+        None => auto(&binary),
+        Some(shell) => print_block(shell, &binary),
     }
 }
 
-fn print_block(shell: &str) -> i32 {
+/// Resolve the path we should write into shell config.
+///
+/// Prefers a PATH-resolved location (e.g. `/opt/homebrew/bin/token-saver`) so the
+/// recorded path remains valid across `brew upgrade`. Falls back to
+/// `env::current_exe()` when not on PATH.
+fn current_binary_path() -> String {
+    if let Some(p) = find_in_path("token-saver")
+        && let Some(s) = p.to_str()
+    {
+        return s.to_string();
+    }
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "token-saver".to_string())
+}
+
+fn find_in_path(name: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if is_executable(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
+
+/// POSIX-safe single-quote escaping. Wraps in single quotes; a literal `'`
+/// becomes `'\''` (close, escaped quote, reopen).
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn print_block(shell: &str, binary: &str) -> i32 {
     match shell {
         "zsh" | "bash" => {
+            let bin = shell_single_quote(binary);
             println!("# token-saver: wrap commands for LLM output compression");
             println!("# Loads only when TOKEN_SAVER=1 — no-op otherwise.");
             println!("if [ \"$TOKEN_SAVER\" = \"1\" ]; then");
             for cmd in COMMANDS {
-                println!("    {cmd}() {{ command token-saver {cmd} \"$@\"; }}");
+                println!("    {cmd}() {{ {bin} {cmd} \"$@\"; }}");
             }
             println!("fi");
             0
@@ -42,7 +91,7 @@ fn print_block(shell: &str) -> i32 {
     }
 }
 
-fn auto() -> i32 {
+fn auto(binary: &str) -> i32 {
     let shell = match detect_shell() {
         Some(s) => s,
         None => {
@@ -65,7 +114,7 @@ fn auto() -> i32 {
     };
 
     let profile = profile_path(&home, &shell);
-    if let Err(e) = update_shell_profile(&profile, &shell) {
+    if let Err(e) = update_shell_profile(&profile, &shell, binary) {
         eprintln!(
             "token-saver init: failed to update {}: {e}",
             profile.display()
@@ -105,23 +154,37 @@ fn profile_path(home: &Path, shell: &str) -> PathBuf {
     }
 }
 
-fn update_shell_profile(path: &Path, shell: &str) -> io::Result<()> {
+fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
-    if existing.contains("token-saver init") {
+    let quoted = shell_single_quote(binary);
+    let new_line = format!(r#"eval "$({quoted} init {shell})""#);
+    let old_line = format!(r#"eval "$(token-saver init {shell})""#);
+
+    if existing.contains(&new_line) {
         println!(
             "Shell hook already present in {} — skipping",
             path.display()
         );
         return Ok(());
     }
+
+    if existing.contains(&old_line) {
+        let updated = existing.replace(&old_line, &new_line);
+        fs::write(path, updated)?;
+        println!(
+            "Upgraded shell hook in {} to use absolute binary path",
+            path.display()
+        );
+        return Ok(());
+    }
+
     let separator = if existing.is_empty() || existing.ends_with('\n') {
         ""
     } else {
         "\n"
     };
-    let block = format!(
-        "{separator}\n# token-saver: enable wrappers when TOKEN_SAVER=1\neval \"$(token-saver init {shell})\"\n"
-    );
+    let block =
+        format!("{separator}\n# token-saver: enable wrappers when TOKEN_SAVER=1\n{new_line}\n");
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -184,22 +247,51 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const BIN: &str = "/opt/homebrew/bin/token-saver";
+
     #[test]
-    fn shell_profile_creates_when_missing() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(".zshenv");
-        update_shell_profile(&path, "zsh").unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains(r#"eval "$(token-saver init zsh)""#));
+    fn shell_quoting_wraps_in_single_quotes() {
+        assert_eq!(shell_single_quote("foo"), "'foo'");
+        assert_eq!(
+            shell_single_quote("/path with space/bin"),
+            "'/path with space/bin'"
+        );
     }
 
     #[test]
-    fn shell_profile_skips_when_already_present() {
+    fn shell_quoting_escapes_embedded_single_quote() {
+        assert_eq!(shell_single_quote("foo'bar"), "'foo'\\''bar'");
+    }
+
+    #[test]
+    fn shell_profile_creates_when_missing_with_absolute_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' init zsh)""#));
+    }
+
+    #[test]
+    fn shell_profile_upgrades_legacy_bare_command_form() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "# user content\neval \"$(token-saver init zsh)\"\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' init zsh)""#));
+        assert!(!content.contains(r#"eval "$(token-saver init zsh)""#));
+        assert!(content.starts_with("# user content\n"));
+    }
+
+    #[test]
+    fn shell_profile_skips_when_already_absolute() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".bashrc");
-        let original = "# user content\neval \"$(token-saver init bash)\"\n";
+        let original = "eval \"$('/opt/homebrew/bin/token-saver' init bash)\"\n";
         fs::write(&path, original).unwrap();
-        update_shell_profile(&path, "bash").unwrap();
+        update_shell_profile(&path, "bash", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(content, original);
     }
@@ -209,10 +301,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".zshenv");
         fs::write(&path, "export FOO=bar").unwrap();
-        update_shell_profile(&path, "zsh").unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("export FOO=bar\n"));
-        assert!(content.contains(r#"eval "$(token-saver init zsh)""#));
+        assert!(content.contains("eval \"$('/opt/homebrew/bin/token-saver' init zsh)\""));
     }
 
     #[test]
