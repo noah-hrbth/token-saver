@@ -1,6 +1,7 @@
 mod compressors;
 mod init;
 mod runner;
+mod uninstall;
 
 use std::env;
 use std::path::PathBuf;
@@ -41,6 +42,9 @@ fn main() {
                 println!(
                     "    token-saver init <shell>           Print shell-function block (zsh|bash)"
                 );
+                println!(
+                    "    token-saver uninstall              Reverse `init` (clean shell profile + settings.json)"
+                );
                 println!("    token-saver --version              Print version");
                 println!();
                 println!("First-time setup (Homebrew or cargo install):");
@@ -50,6 +54,10 @@ fn main() {
             Some("init") => {
                 let init_args: Vec<String> = args.iter().skip(2).cloned().collect();
                 process::exit(init::run(&init_args));
+            }
+            Some("uninstall") => {
+                let uninstall_args: Vec<String> = args.iter().skip(2).cloned().collect();
+                process::exit(uninstall::run(&uninstall_args));
             }
             _ => {}
         }
