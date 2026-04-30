@@ -12,7 +12,7 @@ fetch_sha() {
     local target="$1"
     gh release download "$TAG" \
         -R "$SOURCE_REPO" \
-        -p "token-saver-${target}.tar.gz.sha256" \
+        -p "token-saver-${target}.sha256" \
         -O - | awk '{print $1}'
 }
 
