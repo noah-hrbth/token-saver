@@ -5,10 +5,13 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   create-release:
+    timeout-minutes: 10
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +23,9 @@ jobs:
 
   upload-assets:
     needs: create-release
+    timeout-minutes: 30
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +42,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # Gate the release: the binary built below ships only if tests pass on
+      # the host arch. x86_64-apple-darwin runs on the same arm64 macos-14
+      # host as aarch64-apple-darwin; the Rust code is platform-agnostic so
+      # the arm64 test result is a valid proxy for both Apple targets.
+      - run: cargo test --locked
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: token-saver
@@ -47,6 +59,7 @@ jobs:
 
   bump-tap:
     needs: upload-assets
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

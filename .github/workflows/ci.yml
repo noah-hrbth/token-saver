@@ -6,8 +6,16 @@ on:
   pull_request:
     branches: ["main"]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -20,5 +28,19 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo test --locked
+
+  # macos-14 runners are arm64-only and macos-13 (x86_64) has long queues, so
+  # we cross-build the Intel target here purely to catch compile-time errors.
+  # Runtime coverage for x86_64-apple-darwin is not provided.
+  build-darwin-x86:
+    timeout-minutes: 15
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --target x86_64-apple-darwin

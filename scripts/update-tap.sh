@@ -10,10 +10,18 @@ TAP_REPO="noah-hrbth/homebrew-token-saver"
 
 fetch_sha() {
     local target="$1"
-    gh release download "$TAG" \
+    local sha
+    sha=$(gh release download "$TAG" \
         -R "$SOURCE_REPO" \
         -p "token-saver-${target}.sha256" \
-        -O - | awk '{print $1}'
+        -O - | awk '{print $1}')
+    # Reject empty/malformed hashes — without this, an empty/corrupt .sha256
+    # file would substitute "" into the formula and ship a broken bump.
+    if [[ ! "$sha" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "error: invalid SHA256 for ${target}: '${sha}'" >&2
+        return 1
+    fi
+    printf '%s' "$sha"
 }
 
 SHA_DARWIN_ARM64=$(fetch_sha aarch64-apple-darwin)
