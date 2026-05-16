@@ -12,11 +12,16 @@ pub fn scenarios() -> Vec<Scenario> {
             args: &["-rn", "fn", "."],
             setup: setup_deep_multifile,
             assertions: vec![
-                Assertion::Contains("src/main.rs"),
-                Assertion::Contains("src/handlers/api.rs"),
+                // Tree-grouped: shared dir becomes a header, files nest under it.
+                Assertion::Contains("src/"),
+                Assertion::Contains("handlers/"),
+                Assertion::Contains("api.rs"),
+                Assertion::Contains("main.rs"),
                 Assertion::Contains("fn main"),
-                // Compressed format puts filename on its own line; raw format has file:line:content.
-                // Verify the raw colon-separated format is gone.
+                // Full repeated path prefix is gone (factored into the dir header).
+                Assertion::NotContains("src/main.rs"),
+                Assertion::NotContains("src/handlers/api.rs"),
+                // Raw colon-separated file:line:content format is gone.
                 Assertion::NotContains("src/main.rs:1:"),
             ],
         },
@@ -62,7 +67,10 @@ pub fn scenarios() -> Vec<Scenario> {
                 Assertion::Contains("fn main"),
                 Assertion::Contains("fn handle_get"),
                 Assertion::Contains("fn process"),
-                Assertion::Contains("src/handlers/api.rs"),
+                // Tree-grouped: handlers/ dir header + nested api.rs, not the full path.
+                Assertion::Contains("handlers/"),
+                Assertion::Contains("api.rs"),
+                Assertion::NotContains("src/handlers/api.rs"),
             ],
         },
     ]

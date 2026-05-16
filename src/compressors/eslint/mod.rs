@@ -1,4 +1,7 @@
 use crate::compressors::Compressor;
+use crate::compressors::report::{
+    Group, Item, MidTotalOverflow, Noun, ReportConfig, relativize_path, render_groups,
+};
 use serde::Deserialize;
 
 const MAX_PROBLEMS_PER_FILE: usize = 50;
@@ -199,15 +202,6 @@ fn compress_eslint_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -
     )
 }
 
-fn relativize_path(absolute: &str, cwd: &Option<String>) -> String {
-    if let Some(prefix) = cwd
-        && let Some(stripped) = absolute.strip_prefix(prefix.as_str())
-    {
-        return stripped.to_string();
-    }
-    absolute.to_string()
-}
-
 fn render_output(
     fatal_entries: &[(String, String)],
     file_groups: &[FileOutput],
@@ -226,68 +220,56 @@ fn render_output(
         parts.push(lines.join("\n"));
     }
 
-    // File groups with dual caps
-    let mut total_emitted: usize = 0;
-    let mut skipped_problems: usize = 0;
-    let mut skipped_files: usize = 0;
-    let mut capped = false;
+    // File groups with dual caps (shared capped-report renderer).
+    let groups: Vec<Group> = file_groups
+        .iter()
+        .map(|file_group| {
+            let loc_strings: Vec<String> = file_group
+                .problems
+                .iter()
+                .map(|p| format!("{}:{}", p.line, p.column))
+                .collect();
+            let max_loc_width = loc_strings.iter().map(|s| s.len()).max().unwrap_or(0);
 
-    for file_group in file_groups {
-        if capped {
-            skipped_problems += file_group.problems.len();
-            skipped_files += 1;
-            continue;
-        }
+            let items: Vec<Item> = file_group
+                .problems
+                .iter()
+                .enumerate()
+                .map(|(i, problem)| {
+                    let padded_loc = format!("{:>width$}", &loc_strings[i], width = max_loc_width);
+                    Item::new(format!(
+                        "  {}  {}  {}  {}",
+                        padded_loc, problem.severity, problem.message, problem.rule_id
+                    ))
+                })
+                .collect();
 
-        let mut file_lines: Vec<String> = Vec::new();
-        file_lines.push(file_group.path.clone());
-
-        let loc_strings: Vec<String> = file_group
-            .problems
-            .iter()
-            .map(|p| format!("{}:{}", p.line, p.column))
-            .collect();
-        let max_loc_width = loc_strings.iter().map(|s| s.len()).max().unwrap_or(0);
-
-        let mut file_remaining: usize = 0;
-
-        for (i, problem) in file_group.problems.iter().enumerate() {
-            if total_emitted >= MAX_PROBLEMS_TOTAL {
-                file_remaining = file_group.problems.len() - i;
-                capped = true;
-                break;
+            Group {
+                header: file_group.path.clone(),
+                items,
+                path: Some(file_group.path.clone()),
             }
-            if i >= MAX_PROBLEMS_PER_FILE {
-                file_remaining = file_group.problems.len() - i;
-                break;
-            }
+        })
+        .collect();
 
-            let padded_loc = format!("{:>width$}", &loc_strings[i], width = max_loc_width);
-            file_lines.push(format!(
-                "  {}  {}  {}  {}",
-                padded_loc, problem.severity, problem.message, problem.rule_id
-            ));
-
-            total_emitted += 1;
-        }
-
-        if file_remaining > 0 {
-            file_lines.push(format!(
-                "  ... and {} more problems in this file",
-                file_remaining
-            ));
-        }
-
-        parts.push(file_lines.join("\n"));
+    let report = render_groups(
+        groups,
+        &ReportConfig {
+            max_items_per_group: Some(MAX_PROBLEMS_PER_FILE),
+            max_items_total: MAX_PROBLEMS_TOTAL,
+            items_already_emitted: 0,
+            item_noun: Noun::new("problem", "problems"),
+            group_noun: Noun::new("file", "files"),
+            mid_total: MidTotalOverflow::AttributeToGroup,
+            enter_first_overflow_group: true,
+        },
+    );
+    let tree = crate::compressors::tree::group_by_directory(report.groups).join("\n");
+    if !tree.is_empty() {
+        parts.push(tree);
     }
-
-    // Total overflow for entirely skipped files
-    if skipped_files > 0 {
-        let file_label = if skipped_files == 1 { "file" } else { "files" };
-        parts.push(format!(
-            "... and {} more problems across {} {}",
-            skipped_problems, skipped_files, file_label
-        ));
+    if let Some(line) = report.total_overflow {
+        parts.push(line);
     }
 
     // Summary footer
@@ -666,9 +648,11 @@ mod tests {
             serde_json::json!([make_file("/other/src/main.ts", vec![msg], 1, 0, 0, 0)]).to_string();
         let result = compress_eslint_with_cwd(&json, 1, Some("/project/".to_string())).unwrap();
 
+        // outside-cwd path stays absolute — leading '/' must be preserved.
         assert!(
             result.contains("/other/src/main.ts"),
-            "full path should be preserved when cwd doesn't match"
+            "absolute path must keep its leading slash when cwd doesn't match; got: {}",
+            result
         );
     }
 

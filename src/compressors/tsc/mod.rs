@@ -1,4 +1,7 @@
 use crate::compressors::Compressor;
+use crate::compressors::report::{
+    Group, Item, MidTotalOverflow, Noun, ReportConfig, relativize_path, render_groups,
+};
 use std::collections::BTreeMap;
 
 const MAX_ENTRIES_PER_FILE: usize = 30;
@@ -344,15 +347,6 @@ fn try_parse_location(s: &str) -> Option<(u32, u32)> {
     Some((ln, col))
 }
 
-fn relativize_path(path: &str, cwd: &Option<String>) -> String {
-    if let Some(prefix) = cwd
-        && let Some(stripped) = path.strip_prefix(prefix.as_str())
-    {
-        return stripped.to_string();
-    }
-    path.to_string()
-}
-
 fn render_output(diagnostics: &[TscDiagnostic], cwd: &Option<String>) -> Option<String> {
     let mut config_diags: Vec<&TscDiagnostic> = Vec::new();
     let mut file_map: BTreeMap<String, Vec<&TscDiagnostic>> = BTreeMap::new();
@@ -378,115 +372,100 @@ fn render_output(diagnostics: &[TscDiagnostic], cwd: &Option<String>) -> Option<
         parts.push(lines.join("\n"));
     }
 
-    // File sections with caps
-    let mut total_entries_emitted: usize = 0;
-    let mut skipped_source_errors: usize = 0;
-    let mut skipped_files: usize = 0;
-    let mut capped = false;
+    // File sections with caps (shared capped-report renderer).
+    //
+    // Every file is one group. An inline file (single entry, single location,
+    // no continuations) becomes a group whose header is the one-liner and
+    // whose single empty item carries weight 1 — it counts toward the caps
+    // (matching the old `total_entries_emitted += 1`) but emits no extra line.
+    // A grouped file's header is the file/code-header line; each deduped
+    // entry is one weighted item (weight = location count, matching the old
+    // `file_overflow_errors += entry.locations.len()` / `diags.len()`
+    // accounting). Modeling inline files as groups keeps a single shared
+    // counter walking `file_map` in order, exactly as the old code did.
+    let groups: Vec<Group> = file_map
+        .iter()
+        .map(|(rel_path, diags)| {
+            let entries = group_diagnostics(diags);
 
-    for (rel_path, diags) in &file_map {
-        if capped {
-            skipped_source_errors += diags.len();
-            skipped_files += 1;
-            continue;
-        }
+            let loc_strings: Vec<String> = entries
+                .iter()
+                .map(|e| render_location_str(&e.locations))
+                .collect();
+            let max_loc_width = loc_strings.iter().map(|s| s.len()).max().unwrap_or(0);
 
-        if total_entries_emitted >= MAX_ENTRIES_TOTAL {
-            capped = true;
-            skipped_source_errors += diags.len();
-            skipped_files += 1;
-            continue;
-        }
+            let inline = entries.len() == 1
+                && entries[0].locations.len() == 1
+                && entries[0].continuations.is_empty();
 
-        let entries = group_diagnostics(diags);
-
-        let loc_strings: Vec<String> = entries
-            .iter()
-            .map(|e| render_location_str(&e.locations))
-            .collect();
-        let max_loc_width = loc_strings.iter().map(|s| s.len()).max().unwrap_or(0);
-
-        // inline mode: single entry, single location, no continuations
-        let inline = entries.len() == 1
-            && entries[0].locations.len() == 1
-            && entries[0].continuations.is_empty();
-
-        if inline {
-            if total_entries_emitted >= MAX_ENTRIES_TOTAL {
-                capped = true;
-                skipped_source_errors += diags.len();
-                skipped_files += 1;
-                continue;
+            if inline {
+                let entry = &entries[0];
+                let (ln, col) = entry.locations[0];
+                return Group {
+                    header: format!(
+                        "{}:{}:{}  TS{}  {}",
+                        rel_path, ln, col, entry.code, entry.message
+                    ),
+                    items: vec![Item::new(String::new())],
+                    path: Some(rel_path.clone()),
+                };
             }
-            let entry = &entries[0];
-            let (ln, col) = entry.locations[0];
-            parts.push(format!(
-                "{}:{}:{}  TS{}  {}",
-                rel_path, ln, col, entry.code, entry.message
-            ));
-            total_entries_emitted += 1;
-            continue;
-        }
 
-        // Determine header mode
-        let code_header = entries.iter().all(|e| e.code == entries[0].code);
-
-        let file_header = if code_header {
-            format!("{}  TS{}", rel_path, entries[0].code)
-        } else {
-            rel_path.clone()
-        };
-
-        // cont_prefix: 2 (indent) + max_loc_width + 2 (gap)
-        let cont_prefix = " ".repeat(2 + max_loc_width + 2);
-
-        let mut file_lines: Vec<String> = vec![file_header];
-        let mut file_overflow_errors: usize = 0;
-
-        for (i, entry) in entries.iter().enumerate() {
-            let over_file_cap = i >= MAX_ENTRIES_PER_FILE;
-            let over_total_cap = total_entries_emitted >= MAX_ENTRIES_TOTAL;
-
-            if over_file_cap || over_total_cap {
-                file_overflow_errors += entry.locations.len();
-                if over_total_cap {
-                    capped = true;
-                }
+            let code_header = entries.iter().all(|e| e.code == entries[0].code);
+            let file_header = if code_header {
+                format!("{}  TS{}", rel_path, entries[0].code)
             } else {
-                let loc_str = &loc_strings[i];
-                let padded_loc = format!("{:>width$}", loc_str, width = max_loc_width);
-                if code_header {
-                    file_lines.push(format!("  {}  {}", padded_loc, entry.message));
-                } else {
-                    file_lines.push(format!(
-                        "  {}  TS{}  {}",
-                        padded_loc, entry.code, entry.message
-                    ));
-                }
-                for cont in &entry.continuations {
-                    file_lines.push(format!("{}{}", cont_prefix, cont.trim_start()));
-                }
-                total_entries_emitted += 1;
+                rel_path.clone()
+            };
+            // cont_prefix: 2 (indent) + max_loc_width + 2 (gap)
+            let cont_prefix = " ".repeat(2 + max_loc_width + 2);
+
+            let items: Vec<Item> = entries
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let padded_loc = format!("{:>width$}", &loc_strings[i], width = max_loc_width);
+                    let mut lines = if code_header {
+                        vec![format!("  {}  {}", padded_loc, entry.message)]
+                    } else {
+                        vec![format!(
+                            "  {}  TS{}  {}",
+                            padded_loc, entry.code, entry.message
+                        )]
+                    };
+                    for cont in &entry.continuations {
+                        lines.push(format!("{}{}", cont_prefix, cont.trim_start()));
+                    }
+                    Item::weighted(lines.join("\n"), entry.locations.len())
+                })
+                .collect();
+
+            Group {
+                header: file_header,
+                items,
+                path: Some(rel_path.clone()),
             }
-        }
+        })
+        .collect();
 
-        if file_overflow_errors > 0 {
-            file_lines.push(format!(
-                "  ... and {} more errors in this file",
-                file_overflow_errors
-            ));
-        }
-
-        parts.push(file_lines.join("\n"));
+    let report = render_groups(
+        groups,
+        &ReportConfig {
+            max_items_per_group: Some(MAX_ENTRIES_PER_FILE),
+            max_items_total: MAX_ENTRIES_TOTAL,
+            items_already_emitted: 0,
+            item_noun: Noun::new("error", "errors"),
+            group_noun: Noun::new("file", "files"),
+            mid_total: MidTotalOverflow::AttributeToGroup,
+            enter_first_overflow_group: false,
+        },
+    );
+    let tree = crate::compressors::tree::group_by_directory(report.groups).join("\n");
+    if !tree.is_empty() {
+        parts.push(tree);
     }
-
-    // Total overflow for entirely skipped files
-    if skipped_files > 0 {
-        let file_label = if skipped_files == 1 { "file" } else { "files" };
-        parts.push(format!(
-            "... and {} more errors across {} {}",
-            skipped_source_errors, skipped_files, file_label
-        ));
+    if let Some(line) = report.total_overflow {
+        parts.push(line);
     }
 
     Some(parts.join("\n"))
@@ -676,9 +655,35 @@ mod tests {
             "/project/src/a.ts(1,1): error TS2322: Error in a.\n",
         );
         let result = compress(stdout, 1).unwrap();
-        let a_pos = result.find("src/a.ts").unwrap();
-        let z_pos = result.find("src/z.ts").unwrap();
+        // tree grouping collapses shared src/ prefix; files appear as a.ts / z.ts
+        let a_pos = result.find("a.ts").unwrap();
+        let z_pos = result.find("z.ts").unwrap();
         assert!(a_pos < z_pos, "a.ts should appear before z.ts");
+    }
+
+    #[test]
+    fn directory_grouping_repeated_pattern() {
+        // The canonical token-saving case: 4 files in one dir, each with the
+        // same deduped TS2322 at 1:7,2:7,3:7. Shared src/components/ prefix is
+        // factored into a single header.
+        let mut stdout = String::new();
+        for name in &["button", "input", "modal", "table"] {
+            for ln in 1..=3 {
+                stdout.push_str(&format!(
+                    "/project/src/components/{}.ts({},7): error TS2322: Type 'string' is not assignable to type 'number'.\n",
+                    name, ln
+                ));
+            }
+        }
+        let result = compress(&stdout, 1).unwrap();
+        assert_eq!(
+            result,
+            "src/components/\n  \
+button.ts  TS2322\n    1:7,2:7,3:7  Type 'string' is not assignable to type 'number'\n  \
+input.ts  TS2322\n    1:7,2:7,3:7  Type 'string' is not assignable to type 'number'\n  \
+modal.ts  TS2322\n    1:7,2:7,3:7  Type 'string' is not assignable to type 'number'\n  \
+table.ts  TS2322\n    1:7,2:7,3:7  Type 'string' is not assignable to type 'number'"
+        );
     }
 
     #[test]
@@ -760,12 +765,13 @@ mod tests {
             "should not contain absolute path"
         );
 
-        // Path outside cwd stays absolute
+        // Path outside cwd stays absolute — tree grouping must preserve the
+        // leading '/' so it is not mistaken for a cwd-relative path.
         let stdout2 = "/other/src/bar.ts(1,1): error TS2322: Error.\n";
         let r2 = compress(stdout2, 1).unwrap();
         assert!(
             r2.contains("/other/src/bar.ts:1:1"),
-            "outside-cwd path should be absolute with inline location; got:\n{}",
+            "outside-cwd path must keep its leading slash; got:\n{}",
             r2
         );
     }

@@ -8,6 +8,8 @@ pub mod jest;
 pub mod ls;
 pub mod npx;
 pub mod prettier;
+pub mod report;
+pub mod tree;
 pub mod tsc;
 
 /// Trait for command output compressors.

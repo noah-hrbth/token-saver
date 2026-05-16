@@ -466,7 +466,7 @@ fn filter_and_normalize_groups(groups: Vec<FileGroup>) -> (Vec<FileGroup>, usize
 /// Render a list of `FileGroup`s to a string, enforcing the match cap.
 /// Returns (rendered_string, remaining_match_count).
 fn render_file_groups(groups: &[FileGroup]) -> (String, usize) {
-    let mut parts: Vec<String> = Vec::new();
+    let mut blocks: Vec<crate::compressors::tree::PathBlock> = Vec::new();
     let mut match_count = 0usize;
     let mut capped = false;
     let mut remaining = 0usize;
@@ -475,8 +475,7 @@ fn render_file_groups(groups: &[FileGroup]) -> (String, usize) {
         // Binary file lines have no sub-lines; emit as-is.
         if group.lines.is_empty() {
             if capped {
-                // Still count as 1 match for binary?
-                // Binary lines are rare; treat them as a single match.
+                // Binary lines are rare; treat them as a single match
                 remaining += 1;
             } else {
                 if match_count >= MAX_MATCHES {
@@ -484,7 +483,10 @@ fn render_file_groups(groups: &[FileGroup]) -> (String, usize) {
                     remaining += 1;
                     continue;
                 }
-                parts.push(group.filename.clone());
+                blocks.push(crate::compressors::tree::PathBlock {
+                    path: Some(group.filename.clone()),
+                    block: group.filename.clone(),
+                });
                 match_count += 1;
             }
             continue;
@@ -543,7 +545,10 @@ fn render_file_groups(groups: &[FileGroup]) -> (String, usize) {
         if group_lines.len() > 1 || capped {
             // If we hit cap mid-group, still push what we have
             if group_lines.len() > 1 {
-                parts.push(group_lines.join("\n"));
+                blocks.push(crate::compressors::tree::PathBlock {
+                    path: Some(group.filename.clone()),
+                    block: group_lines.join("\n"),
+                });
             }
         }
 
@@ -560,7 +565,10 @@ fn render_file_groups(groups: &[FileGroup]) -> (String, usize) {
         }
     }
 
-    (parts.join("\n\n"), remaining)
+    (
+        crate::compressors::tree::group_by_directory(blocks).join("\n"),
+        remaining,
+    )
 }
 
 fn format_match_line(line_num: Option<u64>, content: &str, max_digits: usize) -> String {
@@ -820,9 +828,20 @@ mod tests {
     fn compress_multifile_with_line_nums() {
         let stdout = "src/main.rs:5:fn main() {\nsrc/main.rs:10:    println!(\"hello\");\nsrc/lib.rs:3:fn helper() {\n";
         let result = compress(stdout).unwrap();
-        // File headers on own lines
-        assert!(result.contains("src/main.rs\n"));
-        assert!(result.contains("src/lib.rs\n") || result.contains("src/lib.rs"));
+        // Both files share src/ — directory header collapses them
+        assert!(
+            result.contains("src/\n"),
+            "expected src/ header, got: {result:?}"
+        );
+        // Short display names (no dir prefix) under the header
+        assert!(
+            result.contains("lib.rs\n"),
+            "expected lib.rs under header, got: {result:?}"
+        );
+        assert!(
+            result.contains("main.rs\n"),
+            "expected main.rs under header, got: {result:?}"
+        );
         // Matches indented
         assert!(result.contains("  "));
         // Line numbers present
@@ -835,15 +854,26 @@ mod tests {
     fn compress_multifile_without_line_nums() {
         let stdout = "src/main.rs:fn main() {\nsrc/lib.rs:fn helper() {\n";
         let result = compress(stdout).unwrap();
-        assert!(result.contains("src/main.rs"));
-        assert!(result.contains("src/lib.rs"));
-        // Content indented
-        assert!(result.contains("  fn main()"));
-        assert!(result.contains("  fn helper()"));
-        // Files on separate groups
-        let main_pos = result.find("src/main.rs").unwrap();
-        let lib_pos = result.find("src/lib.rs").unwrap();
-        assert!(lib_pos > main_pos);
+        // Both files share src/ — directory header collapses them; short names only
+        assert!(
+            result.contains("src/\n"),
+            "expected src/ header, got: {result:?}"
+        );
+        assert!(
+            result.contains("lib.rs\n"),
+            "expected lib.rs under header, got: {result:?}"
+        );
+        assert!(
+            result.contains("main.rs\n"),
+            "expected main.rs under header, got: {result:?}"
+        );
+        // Content indented (tree adds another 2-space layer on top of the existing 2-space indent)
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("fn helper()"));
+        // lib.rs appears before main.rs (alphabetical order in tree)
+        let lib_pos = result.find("lib.rs").unwrap();
+        let main_pos = result.find("main.rs").unwrap();
+        assert!(lib_pos < main_pos);
     }
 
     #[test]
@@ -956,11 +986,19 @@ mod tests {
     }
 
     #[test]
-    fn compress_file_groups_separated_by_blank_line() {
+    fn compress_same_dir_files_grouped_under_dir_header() {
+        // Both files share src/ — tree groups them under one header, no blank line between
         let stdout = "src/main.rs:1:foo\nsrc/lib.rs:1:bar\n";
         let result = compress(stdout).unwrap();
-        // Two groups should be separated by a blank line
-        assert!(result.contains("\n\n"));
+        assert!(
+            result.contains("src/\n"),
+            "expected src/ header, got: {result:?}"
+        );
+        // No blank lines — tree output joins with single \n
+        assert!(
+            !result.contains("\n\n"),
+            "unexpected blank line in tree output: {result:?}"
+        );
     }
 
     #[test]
@@ -983,5 +1021,52 @@ mod tests {
         // Should detect as multi-file with line nums, not single-file-no-nums
         assert!(result.contains("src/main.rs\n"));
         assert!(result.contains("5:"));
+    }
+
+    // --- tree grouping ---
+
+    #[test]
+    fn tree_shared_dir_produces_dir_header_with_indented_files() {
+        // Arrange: two files sharing src/, each with one match
+        let stdout = "src/foo.rs:1:hello\nsrc/bar.rs:2:world\n";
+        // Act
+        let result = compress(stdout).unwrap();
+        // Assert: directory header, both short names indented under it, matches further indented
+        assert_eq!(
+            result,
+            "src/\n  bar.rs\n    2: world\n  foo.rs\n    1: hello"
+        );
+    }
+
+    #[test]
+    fn tree_lone_deep_file_stays_inline_no_header() {
+        // Arrange: single file buried in a deep path — no siblings, so chain compresses inline
+        let stdout = "a/b/c/needle.rs:5:found\n";
+        // Act
+        let result = compress(stdout).unwrap();
+        // Assert: full path kept, no directory header lines
+        assert_eq!(result, "a/b/c/needle.rs\n  5: found");
+    }
+
+    #[test]
+    fn tree_remaining_overflow_correct_across_grouped_files() {
+        // Arrange: 150 matches in src/a.rs + 100 in src/b.rs = 250 total; cap is MAX_MATCHES=200
+        let mut stdout = String::new();
+        for i in 1..=150u64 {
+            stdout.push_str(&format!("src/a.rs:{}:line {}\n", i, i));
+        }
+        for i in 1..=100u64 {
+            stdout.push_str(&format!("src/b.rs:{}:line {}\n", i, i));
+        }
+        // Act
+        let result = compress(&stdout).unwrap();
+        // Assert: exactly 50 matches overflow
+        assert!(
+            result.contains("... and 50 more matches"),
+            "expected overflow footer, got: {result:?}"
+        );
+        // Emitted match lines: lines containing ": line " that are indented
+        let emitted = result.lines().filter(|l| l.contains(": line ")).count();
+        assert_eq!(emitted, MAX_MATCHES);
     }
 }

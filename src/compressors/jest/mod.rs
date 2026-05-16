@@ -5,6 +5,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::compressors::Compressor;
+use crate::compressors::report::{
+    Group, Item, MidTotalOverflow, Noun, ReportConfig, relativize_path, render_groups,
+};
 
 const MAX_FAILURES_PER_SUITE: usize = 10;
 const MAX_FAILURES_TOTAL: usize = 20;
@@ -165,92 +168,74 @@ fn compress_jest_with_cwd(
 
     let mut parts: Vec<String> = Vec::new();
 
-    // ── FAIL blocks ───────────────────────────────────────────────────────────
-    let mut total_failures_emitted: usize = 0;
-    let mut overflow_suites: usize = 0;
-    let mut overflow_failures: u64 = 0;
+    // ── FAIL blocks (shared capped-report renderer) ───────────────────────────
+    // Each failed suite is a group; one failed assertion (or one synthesized
+    // suite-level message) is one item toward the caps.
+    let failed_groups: Vec<Group> = result
+        .test_results
+        .iter()
+        .filter(|s| s.status == "failed")
+        .map(|suite| {
+            let header = format!("FAIL {}", relativize_path(&suite.name, &cwd));
 
-    for suite in &result.test_results {
-        if suite.status != "failed" {
-            continue;
-        }
+            let failed_assertions: Vec<&JestAssertionResult> = suite
+                .assertion_results
+                .iter()
+                .filter(|a| a.status == "failed")
+                .collect();
 
-        let suite_path = relativize_path(&suite.name, &cwd);
-
-        // Collect failed assertions (or synthesize one from suite message).
-        let failed_assertions: Vec<&JestAssertionResult> = suite
-            .assertion_results
-            .iter()
-            .filter(|a| a.status == "failed")
-            .collect();
-
-        if total_failures_emitted >= MAX_FAILURES_TOTAL {
-            overflow_suites += 1;
-            overflow_failures += if failed_assertions.is_empty() {
-                1
+            let items: Vec<Item> = if failed_assertions.is_empty() {
+                // suite-level failure: one synthesized item; empty block when
+                // there is no message (header-only, still counts toward caps)
+                let block = if suite.message.is_empty() {
+                    String::new()
+                } else {
+                    truncate_error(&suite.message, MAX_ERROR_LINES)
+                        .lines()
+                        .map(|l| format!("  {}", l))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                vec![Item::new(block)]
             } else {
-                failed_assertions.len() as u64
+                failed_assertions
+                    .iter()
+                    .map(|assertion| {
+                        let mut lines = vec![format!("  \u{2717} {}", build_test_name(assertion))];
+                        for raw_msg in &assertion.failure_messages {
+                            let truncated = truncate_error(raw_msg, MAX_ERROR_LINES);
+                            for line in truncated.lines() {
+                                lines.push(format!("    {}", line));
+                            }
+                        }
+                        Item::new(lines.join("\n"))
+                    })
+                    .collect()
             };
-            continue;
-        }
 
-        let mut block_lines: Vec<String> = Vec::new();
-        block_lines.push(format!("FAIL {}", suite_path));
-
-        if failed_assertions.is_empty() {
-            // Suite-level failure (e.g. syntax error) — emit message if present.
-            if !suite.message.is_empty() {
-                let truncated = truncate_error(&suite.message, MAX_ERROR_LINES);
-                for line in truncated.lines() {
-                    block_lines.push(format!("  {}", line));
-                }
+            Group {
+                header,
+                items,
+                path: None,
             }
-            total_failures_emitted += 1;
-        } else {
-            let suite_total = failed_assertions.len();
+        })
+        .collect();
 
-            for (suite_emitted, assertion) in failed_assertions.iter().enumerate() {
-                if total_failures_emitted >= MAX_FAILURES_TOTAL {
-                    // Overflow the rest of this suite.
-                    let remaining = suite_total - suite_emitted;
-                    overflow_suites += 1;
-                    overflow_failures += remaining as u64;
-                    break;
-                }
-                if suite_emitted >= MAX_FAILURES_PER_SUITE {
-                    let remaining = suite_total - suite_emitted;
-                    block_lines.push(format!(
-                        "  ... and {} more failures in this suite",
-                        remaining
-                    ));
-                    break;
-                }
-
-                let full_name = build_test_name(assertion);
-                block_lines.push(format!("  \u{2717} {}", full_name));
-
-                for raw_msg in &assertion.failure_messages {
-                    let truncated = truncate_error(raw_msg, MAX_ERROR_LINES);
-                    for line in truncated.lines() {
-                        block_lines.push(format!("    {}", line));
-                    }
-                }
-
-                total_failures_emitted += 1;
-            }
-        }
-
-        parts.push(block_lines.join("\n"));
-    }
-
-    // Global overflow note.
-    if overflow_suites > 0 {
-        parts.push(format!(
-            "... and {} more failures across {} suite{}",
-            overflow_failures,
-            overflow_suites,
-            if overflow_suites == 1 { "" } else { "s" }
-        ));
+    let report = render_groups(
+        failed_groups,
+        &ReportConfig {
+            max_items_per_group: Some(MAX_FAILURES_PER_SUITE),
+            max_items_total: MAX_FAILURES_TOTAL,
+            items_already_emitted: 0,
+            item_noun: Noun::new("failure", "failures"),
+            group_noun: Noun::new("suite", "suites"),
+            mid_total: MidTotalOverflow::AttributeToTotal,
+            enter_first_overflow_group: false,
+        },
+    );
+    parts.extend(report.groups.into_iter().map(|g| g.block));
+    if let Some(line) = report.total_overflow {
+        parts.push(line);
     }
 
     // ── Suite list ────────────────────────────────────────────────────────────
@@ -281,15 +266,6 @@ fn compress_jest_with_cwd(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn relativize_path(absolute: &str, cwd: &Option<String>) -> String {
-    if let Some(prefix) = cwd
-        && let Some(stripped) = absolute.strip_prefix(prefix.as_str())
-    {
-        return stripped.to_string();
-    }
-    absolute.to_string()
-}
 
 fn build_test_name(assertion: &JestAssertionResult) -> String {
     if assertion.ancestor_titles.is_empty() {
