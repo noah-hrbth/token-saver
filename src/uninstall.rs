@@ -1,3 +1,4 @@
+use crate::shell_hook::is_token_saver_hook;
 use serde_json::Value;
 use std::env;
 use std::fs;
@@ -6,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// Dispatch entry point for `token-saver uninstall`.
 ///
-/// Reverses what `token-saver init` did:
+/// Reverses what `token-saver install` did:
 /// - strips token-saver lines from `~/.zshenv` and `~/.bashrc`
 /// - removes `TOKEN_SAVER` from `~/.claude/settings.json`
 ///
@@ -73,9 +74,11 @@ fn auto() -> i32 {
 /// Returns `Ok(true)` if the file changed, `Ok(false)` if nothing matched
 /// (or the file is missing). Lines we strip:
 /// - any `# token-saver: ...` comment (current and legacy forms)
-/// - any `eval` line that references `token-saver` — covers both the
-///   current quoted-path form `eval "$('/path/to/token-saver' init zsh)"`
-///   and the legacy bare form `eval "$(token-saver init zsh)"`
+/// - any token-saver `eval` hook line (see [`is_token_saver_hook`]) — covers
+///   the canonical quoted-path form
+///   `eval "$('/path/to/token-saver' install zsh)"` and all legacy forms
+///   (bare `token-saver install`, and `init` instead of `install` from
+///   pre-rename installs). Shared with `install` so the two never diverge.
 /// - any line referencing `.token-saver/bin` (the PATH export from install.sh)
 /// - the legacy multi-line `if [ "$TOKEN_SAVER" = "1" ]; then ... fi` block
 ///   that older install.sh versions inlined into the profile
@@ -116,7 +119,7 @@ fn strip_token_saver_lines(content: &str) -> Option<String> {
         }
 
         if trimmed.starts_with("# token-saver:")
-            || (trimmed.starts_with("eval ") && trimmed.contains("token-saver"))
+            || is_token_saver_hook(trimmed)
             || trimmed.contains(".token-saver/bin")
         {
             changed = true;

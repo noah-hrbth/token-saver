@@ -1,3 +1,4 @@
+use crate::shell_hook::{HOOK_MARKER, is_token_saver_hook};
 use serde_json::{Map, Value};
 use std::env;
 use std::fs;
@@ -8,10 +9,10 @@ const COMMANDS: &[&str] = &[
     "cat", "eslint", "git", "jest", "ls", "find", "grep", "npx", "prettier", "rg", "tsc",
 ];
 
-/// Dispatch entry point for `token-saver init [shell]`.
+/// Dispatch entry point for `token-saver install [shell]`.
 ///
-/// - `init` (no args): auto-detect shell, edit profile, edit `~/.claude/settings.json`.
-/// - `init zsh|bash`: print the shell-function block (for `eval "$(...)"` use).
+/// - `install` (no args): auto-detect shell, edit profile, edit `~/.claude/settings.json`.
+/// - `install zsh|bash`: print the shell-function block (for `eval "$(...)"` use).
 pub fn run(args: &[String]) -> i32 {
     let binary = current_binary_path();
     match args.first().map(String::as_str) {
@@ -81,11 +82,11 @@ fn print_block(shell: &str, binary: &str) -> i32 {
             0
         }
         "" => {
-            eprintln!("token-saver init: missing shell argument (zsh|bash)");
+            eprintln!("token-saver install: missing shell argument (zsh|bash)");
             2
         }
         other => {
-            eprintln!("token-saver init: unsupported shell '{other}' (supported: zsh, bash)");
+            eprintln!("token-saver install: unsupported shell '{other}' (supported: zsh, bash)");
             2
         }
     }
@@ -96,10 +97,10 @@ fn auto(binary: &str) -> i32 {
         Some(s) => s,
         None => {
             eprintln!(
-                "token-saver init: could not detect a supported shell from $SHELL (need zsh or bash)"
+                "token-saver install: could not detect a supported shell from $SHELL (need zsh or bash)"
             );
             eprintln!(
-                "Run `token-saver init zsh` or `token-saver init bash` and add the eval line to your profile manually."
+                "Run `token-saver install zsh` or `token-saver install bash` and add the eval line to your profile manually."
             );
             return 1;
         }
@@ -108,7 +109,7 @@ fn auto(binary: &str) -> i32 {
     let home = match env::var_os("HOME") {
         Some(h) => PathBuf::from(h),
         None => {
-            eprintln!("token-saver init: $HOME is not set");
+            eprintln!("token-saver install: $HOME is not set");
             return 1;
         }
     };
@@ -116,7 +117,7 @@ fn auto(binary: &str) -> i32 {
     let profile = profile_path(&home, &shell);
     if let Err(e) = update_shell_profile(&profile, &shell, binary) {
         eprintln!(
-            "token-saver init: failed to update {}: {e}",
+            "token-saver install: failed to update {}: {e}",
             profile.display()
         );
         return 1;
@@ -125,7 +126,7 @@ fn auto(binary: &str) -> i32 {
     let settings = home.join(".claude").join("settings.json");
     if let Err(e) = update_claude_settings(&settings) {
         eprintln!(
-            "token-saver init: failed to update {}: {e}",
+            "token-saver install: failed to update {}: {e}",
             settings.display()
         );
         return 1;
@@ -157,10 +158,16 @@ fn profile_path(home: &Path, shell: &str) -> PathBuf {
 fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let quoted = shell_single_quote(binary);
-    let new_line = format!(r#"eval "$({quoted} init {shell})""#);
-    let old_line = format!(r#"eval "$(token-saver init {shell})""#);
+    let canonical = format!(r#"eval "$({quoted} install {shell})""#);
 
-    if existing.contains(&new_line) {
+    let hook_count = existing
+        .lines()
+        .filter(|l| is_token_saver_hook(l.trim_start()))
+        .count();
+
+    // Exactly one hook and it is already canonical — nothing to do.
+    // (Kept strict so this stays a true no-op and converges.)
+    if hook_count == 1 && existing.lines().any(|l| l.trim_start() == canonical) {
         println!(
             "Shell hook already present in {} — skipping",
             path.display()
@@ -168,11 +175,34 @@ fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()
         return Ok(());
     }
 
-    if existing.contains(&old_line) {
-        let updated = existing.replace(&old_line, &new_line);
+    // Any hook present (possibly stale path, legacy `init`, or a duplicate
+    // from an earlier buggy run): rewrite the first hook in place to the
+    // marker comment + canonical line and drop every other token-saver hook
+    // and marker comment. Path-agnostic so it migrates across `brew upgrade`
+    // / reinstall too, and produces the same shape as a fresh install.
+    if hook_count >= 1 {
+        let mut out: Vec<&str> = Vec::with_capacity(existing.lines().count());
+        let mut canonical_emitted = false;
+        for line in existing.lines() {
+            let trimmed = line.trim_start();
+            if is_token_saver_hook(trimmed) {
+                if !canonical_emitted {
+                    out.push(HOOK_MARKER);
+                    out.push(&canonical);
+                    canonical_emitted = true;
+                }
+                continue;
+            }
+            if trimmed.starts_with("# token-saver:") {
+                continue;
+            }
+            out.push(line);
+        }
+        let mut updated = out.join("\n");
+        updated.push('\n');
         fs::write(path, updated)?;
         println!(
-            "Upgraded shell hook in {} to use absolute binary path",
+            "Upgraded shell hook in {} to the canonical install form",
             path.display()
         );
         return Ok(());
@@ -183,8 +213,7 @@ fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()
     } else {
         "\n"
     };
-    let block =
-        format!("{separator}\n# token-saver: enable wrappers when TOKEN_SAVER=1\n{new_line}\n");
+    let block = format!("{separator}\n{HOOK_MARKER}\n{canonical}\n");
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -264,32 +293,89 @@ mod tests {
     }
 
     #[test]
+    fn shell_profile_collapses_multiple_stale_hooks_into_one() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        // Two differing token-saver hooks + a stray marker comment, with user
+        // content interleaved (simulates an earlier buggy double-install).
+        let original = "# user content\n\
+            # token-saver: enable wrappers when TOKEN_SAVER=1\n\
+            eval \"$(token-saver init zsh)\"\n\
+            export FOO=bar\n\
+            eval \"$('/old/path/token-saver' install zsh)\"\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        // exactly one hook line, and it is canonical
+        let canonical = r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#;
+        assert_eq!(content.matches("eval ").count(), 1);
+        assert!(content.contains(canonical));
+        // exactly one marker comment, restored above the hook
+        assert_eq!(content.matches(HOOK_MARKER).count(), 1);
+        assert!(content.contains(&format!("{HOOK_MARKER}\n{canonical}")));
+        // user content preserved
+        assert!(content.contains("# user content"));
+        assert!(content.contains("export FOO=bar"));
+
+        // re-running on the upgraded shape is a true no-op
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
     fn shell_profile_creates_when_missing_with_absolute_path() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".zshenv");
         update_shell_profile(&path, "zsh", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' init zsh)""#));
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#));
     }
 
     #[test]
-    fn shell_profile_upgrades_legacy_bare_command_form() {
+    fn shell_profile_upgrades_legacy_bare_init_form() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".zshenv");
         let original = "# user content\neval \"$(token-saver init zsh)\"\n";
         fs::write(&path, original).unwrap();
         update_shell_profile(&path, "zsh", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' init zsh)""#));
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#));
         assert!(!content.contains(r#"eval "$(token-saver init zsh)""#));
         assert!(content.starts_with("# user content\n"));
     }
 
     #[test]
-    fn shell_profile_skips_when_already_absolute() {
+    fn shell_profile_upgrades_absolute_init_form() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "# user content\neval \"$('/opt/homebrew/bin/token-saver' init zsh)\"\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#));
+        assert!(!content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' init zsh)""#));
+        assert!(content.starts_with("# user content\n"));
+    }
+
+    #[test]
+    fn shell_profile_upgrades_bare_install_form() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "# user content\neval \"$(token-saver install zsh)\"\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#));
+        assert!(!content.contains(r#"eval "$(token-saver install zsh)""#));
+        assert!(content.starts_with("# user content\n"));
+    }
+
+    #[test]
+    fn shell_profile_skips_when_already_canonical() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(".bashrc");
-        let original = "eval \"$('/opt/homebrew/bin/token-saver' init bash)\"\n";
+        let original = "eval \"$('/opt/homebrew/bin/token-saver' install bash)\"\n";
         fs::write(&path, original).unwrap();
         update_shell_profile(&path, "bash", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
@@ -304,7 +390,7 @@ mod tests {
         update_shell_profile(&path, "zsh", BIN).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("export FOO=bar\n"));
-        assert!(content.contains("eval \"$('/opt/homebrew/bin/token-saver' init zsh)\""));
+        assert!(content.contains("eval \"$('/opt/homebrew/bin/token-saver' install zsh)\""));
     }
 
     #[test]

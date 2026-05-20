@@ -58,15 +58,15 @@ add_shell_hook() {
         echo "  Removed legacy shell function block from $profile"
     fi
 
-    # Skip if init line already present
-    if [ -f "$profile" ] && grep -qF 'token-saver init' "$profile"; then
+    # Skip if init/install line already present
+    if [ -f "$profile" ] && grep -qE "token-saver['\" ]+(init|install)" "$profile"; then
         echo "  Shell hook already in $profile — skipping"
         return
     fi
 
     # Create profile if it doesn't exist
     touch "$profile"
-    printf '\nexport PATH="$HOME/.token-saver/bin:$PATH"\neval "$(token-saver init %s)"\n' "$shell_name" >> "$profile"
+    printf '\nexport PATH="$HOME/.token-saver/bin:$PATH"\neval "$(token-saver install %s)"\n' "$shell_name" >> "$profile"
     echo "  Added shell init to $profile"
 }
 
@@ -78,7 +78,7 @@ case "$SHELL_NAME" in
     bash) add_shell_hook "$HOME/.bashrc" "bash" ;;
     *)    echo "  Unknown shell ($SHELL_NAME) — add this to your profile manually:"
           echo "    export PATH=\"\$HOME/.token-saver/bin:\$PATH\""
-          echo "    eval \"\$(token-saver init $SHELL_NAME)\"" ;;
+          echo "    eval \"\$(token-saver install $SHELL_NAME)\"" ;;
 esac
 
 echo ""

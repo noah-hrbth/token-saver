@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Uninstall token-saver:
 #   1. Run `token-saver uninstall` to undo the shell-profile and
-#      ~/.claude/settings.json edits that `token-saver init` made.
+#      ~/.claude/settings.json edits that `token-saver install` made.
 #   2. Remove the binary at ~/.token-saver/bin/token-saver.
 #   3. Prune the install dir if it becomes empty.
 

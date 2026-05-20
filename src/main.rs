@@ -1,6 +1,7 @@
 mod compressors;
-mod init;
+mod install;
 mod runner;
+mod shell_hook;
 mod uninstall;
 
 use std::env;
@@ -22,7 +23,7 @@ fn main() {
 
     let (command, command_args) = if binary_name == "token-saver" {
         match args.get(1).map(String::as_str) {
-            Some("--version") | Some("-V") => {
+            Some("version") => {
                 println!("token-saver {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
@@ -37,23 +38,23 @@ fn main() {
                     "    token-saver <command> [args...]    Run command with compression (when TOKEN_SAVER=1)"
                 );
                 println!(
-                    "    token-saver init                   Auto-configure shell profile + Claude Code settings.json"
+                    "    token-saver install                Auto-configure shell profile + Claude Code settings.json"
                 );
                 println!(
-                    "    token-saver init <shell>           Print shell-function block (zsh|bash)"
+                    "    token-saver install <shell>        Print shell-function block (zsh|bash)"
                 );
                 println!(
-                    "    token-saver uninstall              Reverse `init` (clean shell profile + settings.json)"
+                    "    token-saver uninstall              Reverse `install` (clean shell profile + settings.json)"
                 );
-                println!("    token-saver --version              Print version");
+                println!("    token-saver version                Print version");
                 println!();
                 println!("First-time setup (Homebrew or cargo install):");
-                println!("    token-saver init                   # one-shot setup");
+                println!("    token-saver install                # one-shot setup");
                 return;
             }
-            Some("init") => {
-                let init_args: Vec<String> = args.iter().skip(2).cloned().collect();
-                process::exit(init::run(&init_args));
+            Some("install") | Some("init") => {
+                let install_args: Vec<String> = args.iter().skip(2).cloned().collect();
+                process::exit(install::run(&install_args));
             }
             Some("uninstall") => {
                 let uninstall_args: Vec<String> = args.iter().skip(2).cloned().collect();
