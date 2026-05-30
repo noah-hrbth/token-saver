@@ -1,6 +1,8 @@
 use crate::compressors::Compressor;
 
-pub struct GitBranchCompressor;
+pub struct GitBranchCompressor {
+    pub verbose: bool,
+}
 
 const MAX_BRANCHES: usize = 50;
 
@@ -26,22 +28,61 @@ const FILTER_FLAGS: &[&str] = &[
     "--points-at",
 ];
 
+/// Name-gate FIRST (dispatcher ordering invariant), then decline create
+/// positionals and mutation/format/show-current flags.
+pub(crate) fn matches(args: &[String]) -> bool {
+    if args.first().map(String::as_str) != Some("branch") {
+        return false;
+    }
+    if has_create_positional(args) {
+        return false; // create / rename / --list <pattern> / start-point
+    }
+    !args.iter().skip(1).any(|a| {
+        MUTATION_FLAGS.contains(&a.as_str()) || a.starts_with("--format") || a == "--show-current"
+    })
+}
+
+/// True if a bare positional remains after accounting for filter-flag values.
+/// A `--merged <ref>` value (and friends) belongs to its flag and must NOT be
+/// mistaken for a positional — those invocations still compress to a filtered
+/// branch list. A remaining bare token means creation/rename or `--list
+/// <pattern>`, which we cannot represent, so we passthrough.
+fn has_create_positional(args: &[String]) -> bool {
+    let mut i = 1; // skip the "branch" subcommand
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if FILTER_FLAGS.contains(&arg) {
+            // space-separated value belongs to this filter flag — skip it
+            if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                i += 2;
+                continue;
+            }
+        } else if !arg.starts_with('-') {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// True when any verbose flag is present (used by the dispatcher to set the field).
+pub(crate) fn is_verbose(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "-v" || a == "-vv" || a == "--verbose")
+}
+
 impl Compressor for GitBranchCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
-        if args.first().map(|s| s.as_str()) != Some("branch") {
-            return false;
-        }
-        !args
-            .iter()
-            .skip(1)
-            .any(|a| MUTATION_FLAGS.contains(&a.as_str()) || a.starts_with("--format"))
+        matches(args)
     }
 
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
-        let mut result = vec![
-            "branch".to_string(),
-            "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(symref:short)\t%(refname)".to_string(),
-        ];
+        let format = if self.verbose {
+            "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(symref:short)\t%(refname)\t%(objectname:short)\t%(contents:subject)".to_string()
+        } else {
+            "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(symref:short)\t%(refname)".to_string()
+        };
+        let mut result = vec!["branch".to_string(), format];
 
         let args = &original_args[1..];
         let mut i = 0;
@@ -91,6 +132,8 @@ struct BranchEntry {
     track: String,
     symref: String,
     full_ref: String,
+    sha: String,
+    subject: String,
 }
 
 fn parse_line(line: &str) -> Option<BranchEntry> {
@@ -105,6 +148,8 @@ fn parse_line(line: &str) -> Option<BranchEntry> {
     let track = if fields.len() > 3 { fields[3] } else { "" };
     let symref = if fields.len() > 4 { fields[4] } else { "" };
     let full_ref = if fields.len() > 5 { fields[5] } else { "" };
+    let sha = if fields.len() > 6 { fields[6] } else { "" };
+    let subject = if fields.len() > 7 { fields[7] } else { "" };
 
     if name.is_empty() {
         return None;
@@ -117,6 +162,8 @@ fn parse_line(line: &str) -> Option<BranchEntry> {
         track: track.to_string(),
         symref: symref.to_string(),
         full_ref: full_ref.to_string(),
+        sha: sha.to_string(),
+        subject: subject.to_string(),
     })
 }
 
@@ -219,18 +266,26 @@ fn parse_branches(output: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-fn format_local_branch(entry: &BranchEntry) -> String {
-    let marker = if entry.is_current { "*" } else { " " };
-    let mut line = format!("{} {}", marker, entry.name);
-
+fn format_tracking(entry: &BranchEntry) -> String {
+    let mut s = String::new();
     if !entry.upstream.is_empty() {
-        line.push_str(&format!("  {}", entry.upstream));
+        s.push_str(&format!("  {}", entry.upstream));
     }
     if !entry.track.is_empty() {
-        line.push_str(&format!(" {}", entry.track));
+        s.push_str(&format!(" {}", entry.track));
     }
+    s
+}
 
-    line
+fn format_local_branch(entry: &BranchEntry) -> String {
+    let marker = if entry.is_current { "* " } else { "  " };
+    let tracking = format_tracking(entry);
+    let verbose = if entry.sha.is_empty() {
+        String::new()
+    } else {
+        format!(" {} {}", entry.sha, entry.subject)
+    };
+    format!("{}{}{}{}", marker, entry.name, tracking, verbose)
 }
 
 fn group_by_remote<'a>(entries: &[&'a BranchEntry]) -> Vec<(String, Vec<&'a BranchEntry>)> {
@@ -259,7 +314,7 @@ mod tests {
     use super::*;
 
     fn compress(input: &str) -> Option<String> {
-        GitBranchCompressor.compress(input, "", 0)
+        GitBranchCompressor { verbose: false }.compress(input, "", 0)
     }
 
     #[test]
@@ -352,7 +407,10 @@ mod tests {
 
     #[test]
     fn test_nonzero_exit_returns_none() {
-        assert_eq!(GitBranchCompressor.compress("anything", "", 128), None);
+        assert_eq!(
+            GitBranchCompressor { verbose: false }.compress("anything", "", 128),
+            None
+        );
     }
 
     #[test]
@@ -363,12 +421,12 @@ mod tests {
 
     #[test]
     fn test_can_compress_basic() {
-        assert!(GitBranchCompressor.can_compress(&["branch".into()]));
+        assert!(GitBranchCompressor { verbose: false }.can_compress(&["branch".into()]));
     }
 
     #[test]
     fn test_can_compress_with_flags() {
-        let c = GitBranchCompressor;
+        let c = GitBranchCompressor { verbose: false };
         assert!(c.can_compress(&["branch".into(), "-v".into()]));
         assert!(c.can_compress(&["branch".into(), "-a".into()]));
         assert!(c.can_compress(&["branch".into(), "-r".into()]));
@@ -378,13 +436,14 @@ mod tests {
     #[test]
     fn test_skip_format_flag() {
         assert!(
-            !GitBranchCompressor.can_compress(&["branch".into(), "--format=%(refname)".into()])
+            !GitBranchCompressor { verbose: false }
+                .can_compress(&["branch".into(), "--format=%(refname)".into()])
         );
     }
 
     #[test]
     fn test_skip_mutation_flags() {
-        let c = GitBranchCompressor;
+        let c = GitBranchCompressor { verbose: false };
         assert!(!c.can_compress(&["branch".into(), "-d".into(), "feature".into()]));
         assert!(!c.can_compress(&["branch".into(), "-D".into(), "feature".into()]));
         assert!(!c.can_compress(&["branch".into(), "-m".into(), "old".into(), "new".into()]));
@@ -395,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_normalized_args_basic() {
-        let result = GitBranchCompressor.normalized_args(&["branch".into()]);
+        let result = GitBranchCompressor { verbose: false }.normalized_args(&["branch".into()]);
         assert_eq!(result[0], "branch");
         assert!(result[1].starts_with("--format="));
         assert_eq!(result.len(), 2);
@@ -403,19 +462,21 @@ mod tests {
 
     #[test]
     fn test_normalized_args_preserves_remote() {
-        let result = GitBranchCompressor.normalized_args(&["branch".into(), "-r".into()]);
+        let result =
+            GitBranchCompressor { verbose: false }.normalized_args(&["branch".into(), "-r".into()]);
         assert!(result.contains(&"-r".to_string()));
     }
 
     #[test]
     fn test_normalized_args_preserves_all() {
-        let result = GitBranchCompressor.normalized_args(&["branch".into(), "-a".into()]);
+        let result =
+            GitBranchCompressor { verbose: false }.normalized_args(&["branch".into(), "-a".into()]);
         assert!(result.contains(&"-a".to_string()));
     }
 
     #[test]
     fn test_normalized_args_preserves_filters() {
-        let result = GitBranchCompressor.normalized_args(&[
+        let result = GitBranchCompressor { verbose: false }.normalized_args(&[
             "branch".into(),
             "--merged".into(),
             "main".into(),
@@ -430,5 +491,90 @@ mod tests {
         let result = compress(input).unwrap();
         let first_line = result.lines().next().unwrap();
         assert!(first_line.starts_with("* zzz"));
+    }
+
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// U7-1: bare positional arg (branch name, start-point, pattern) → decline
+    #[test]
+    fn branch_name_positional_declines() {
+        assert!(!GitBranchCompressor { verbose: false }.can_compress(&args(&["branch", "feat"])));
+        assert!(
+            !GitBranchCompressor { verbose: false }
+                .can_compress(&args(&["branch", "--track", "x", "origin/x"]))
+        );
+        assert!(
+            !GitBranchCompressor { verbose: false }
+                .can_compress(&args(&["branch", "--list", "feat/*"]))
+        );
+    }
+
+    /// Filter flags with a space-separated value still compress — the value
+    /// belongs to the flag and is not a create positional (regression guard).
+    #[test]
+    fn filter_flag_value_still_compresses() {
+        let c = GitBranchCompressor { verbose: false };
+        assert!(c.can_compress(&args(&["branch", "--merged", "main"])));
+        assert!(c.can_compress(&args(&["branch", "--contains", "HEAD"])));
+        assert!(c.can_compress(&args(&["branch", "--points-at", "v1.0"])));
+        assert!(c.can_compress(&args(&["branch", "-a", "--merged", "main"])));
+        // a create positional alongside a filter flag still declines
+        assert!(!c.can_compress(&args(&["branch", "--merged", "main", "newbranch"])));
+    }
+
+    /// U7-3: --show-current → decline
+    #[test]
+    fn show_current_declines() {
+        assert!(
+            !GitBranchCompressor { verbose: false }
+                .can_compress(&args(&["branch", "--show-current"]))
+        );
+    }
+
+    /// U7-2: verbose mode emits sha and subject in compressed output
+    #[test]
+    fn verbose_emits_sha_and_subject() {
+        let raw = "*\tmain\torigin/main\t\t\trefs/heads/main\tabc1234\tInitial commit\n";
+        let result = GitBranchCompressor { verbose: true }
+            .compress(raw, "", 0)
+            .unwrap();
+        assert!(
+            result.contains("abc1234"),
+            "Expected sha in output, got: {}",
+            result
+        );
+        assert!(
+            result.contains("Initial commit"),
+            "Expected subject in output, got: {}",
+            result
+        );
+    }
+
+    /// Non-verbose with 6-field fixture → output contains branch name, no sha rendered
+    #[test]
+    fn non_verbose_omits_sha() {
+        let raw = "*\tmain\torigin/main\t\t\trefs/heads/main\n";
+        let result = GitBranchCompressor { verbose: false }
+            .compress(raw, "", 0)
+            .unwrap();
+        assert!(
+            result.contains("* main"),
+            "Expected '* main', got: {}",
+            result
+        );
+        // 6-field line yields empty sha → not rendered; no 7-char hex string
+        assert!(
+            !result.contains("abc1234"),
+            "Should not contain sha, got: {}",
+            result
+        );
+    }
+
+    /// -v/-vv flag still compresses (only positionals/show-current/mutation decline)
+    #[test]
+    fn verbose_flag_still_compresses() {
+        assert!(GitBranchCompressor { verbose: true }.can_compress(&args(&["branch", "-v"])));
     }
 }

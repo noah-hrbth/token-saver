@@ -10,15 +10,22 @@ use super::Compressor;
 
 /// Find a compressor for the given git subcommand args.
 pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
-    let compressors: Vec<Box<dyn Compressor>> = vec![
-        Box::new(branch::GitBranchCompressor),
-        Box::new(diff::GitDiffCompressor),
-        Box::new(log::GitLogCompressor),
-        Box::new(show::GitShowCompressor),
-        Box::new(status::GitStatusCompressor),
-    ];
-
-    compressors
-        .into_iter()
-        .find(|compressor| compressor.can_compress(args))
+    if branch::matches(args) {
+        return Some(Box::new(branch::GitBranchCompressor {
+            verbose: branch::is_verbose(args),
+        }));
+    }
+    if diff::GitDiffCompressor.can_compress(args) {
+        return Some(Box::new(diff::GitDiffCompressor));
+    }
+    if log::GitLogCompressor.can_compress(args) {
+        return Some(Box::new(log::GitLogCompressor));
+    }
+    if show::GitShowCompressor.can_compress(args) {
+        return Some(Box::new(show::GitShowCompressor));
+    }
+    if status::GitStatusCompressor.can_compress(args) {
+        return Some(Box::new(status::GitStatusCompressor));
+    }
+    None
 }
