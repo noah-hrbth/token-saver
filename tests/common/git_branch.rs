@@ -58,6 +58,17 @@ pub fn scenarios() -> Vec<Scenario> {
                 Assertion::NotContains("* "),
             ],
         },
+        // Showcases U7-2: -v output keeps the commit SHA + subject (previously dropped).
+        Scenario {
+            name: "Verbose (-v) keeps SHA + subject",
+            command: "git",
+            args: &["branch", "-v"],
+            setup: setup_verbose_branches,
+            assertions: vec![
+                Assertion::Contains("add auth module"),
+                Assertion::Contains("fix login redirect"),
+            ],
+        },
     ]
 }
 
@@ -92,6 +103,29 @@ fn setup_many_branches(repo: &Path) {
             .output()
             .unwrap();
     }
+}
+
+fn setup_verbose_branches(repo: &Path) {
+    // Branches with distinct commits + subjects so -v has SHA+subject worth
+    // showing. Ends back on main so it stays the current branch.
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+    };
+    git(&["checkout", "-b", "feature-auth"]);
+    std::fs::write(repo.join("auth.rs"), "// auth").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "add auth module"]);
+
+    git(&["checkout", "-b", "bugfix-login"]);
+    std::fs::write(repo.join("login.rs"), "// login").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "fix login redirect"]);
+
+    git(&["checkout", "main"]);
 }
 
 fn setup_with_remote(repo: &Path) {

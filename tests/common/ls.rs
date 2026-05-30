@@ -58,6 +58,14 @@ pub fn scenarios() -> Vec<Scenario> {
                 Assertion::NotContains("outer.txt"),
             ],
         },
+        // Showcases U15-4: filenames with consecutive spaces survive verbatim.
+        Scenario {
+            name: "Filename with consecutive spaces",
+            command: "ls",
+            args: &["-la"],
+            setup: setup_multi_space_name,
+            assertions: vec![Assertion::Contains("a  b.txt (")],
+        },
     ]
 }
 
@@ -88,4 +96,8 @@ fn setup_subdir(repo: &Path) {
     fs::write(repo.join("outer.txt"), "outside").unwrap();
     fs::create_dir_all(repo.join("subdir")).unwrap();
     fs::write(repo.join("subdir/inner.txt"), "inside").unwrap();
+}
+
+fn setup_multi_space_name(repo: &Path) {
+    fs::write(repo.join("a  b.txt"), "content").unwrap();
 }

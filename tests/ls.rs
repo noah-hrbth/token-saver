@@ -24,3 +24,8 @@ fn compressed_symlinks() {
 fn compressed_with_path_arg() {
     common::run_test(&common::ls::scenarios()[4]);
 }
+
+#[test]
+fn compressed_multi_space_filename() {
+    common::run_test(&common::ls::scenarios()[5]);
+}
