@@ -301,6 +301,56 @@ fn passthrough_ls_without_env() {
 }
 
 #[test]
+fn ls_lt_passes_through() {
+    // -lt (sort by mtime) is lossy for our compressor -> must passthrough raw.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file.txt"), "hello").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["ls", "-lt"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Raw ls -l output carries permission strings; the compressor strips them.
+    assert!(
+        stdout.contains("-rw") || stdout.contains("drw"),
+        "Expected raw ls -lt output with permissions, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn ls_ld_dir_passes_through() {
+    // -ld shows the directory entry itself; compressing would list its contents.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("subdir")).unwrap();
+    fs::write(dir.path().join("subdir/inner.txt"), "x").unwrap();
+
+    let output = Command::new(common::binary_path())
+        .args(["ls", "-ld", "subdir"])
+        .env("TOKEN_SAVER", "1")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Raw `ls -ld subdir` prints the dir's own perms line; it must NOT list inner.txt.
+    assert!(
+        stdout.contains("drw"),
+        "Expected raw ls -ld output (dir entry with permissions), got: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("inner.txt"),
+        "ls -ld must not list directory contents, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn passthrough_grep_list_files() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "hello world\n").unwrap();

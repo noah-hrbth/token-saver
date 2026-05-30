@@ -7,12 +7,24 @@ impl Compressor for LsCompressor {
         let mut has_l = false;
 
         for arg in args {
-            if !arg.starts_with('-') {
-                continue; // path argument, skip
+            if arg == "--" {
+                break; // end of options — rest are paths
             }
-            let flags = arg.trim_start_matches('-');
-            if flags.contains('R') {
-                return false; // recursive — skip
+            // long option (--foo) or a path: never a short-flag bundle
+            if arg.starts_with("--") || !arg.starts_with('-') {
+                continue;
+            }
+            // single-dash bundle: inspect its letters
+            let flags = &arg[1..];
+            // lossy modes we cannot faithfully compress -> decline (passthrough):
+            // R recursive, t/S/r sort, d directory-entry
+            if flags.contains('R')
+                || flags.contains('t')
+                || flags.contains('S')
+                || flags.contains('r')
+                || flags.contains('d')
+            {
+                return false;
             }
             if flags.contains('l') {
                 has_l = true;
@@ -89,8 +101,10 @@ fn parse_ls_line(line: &str) -> Option<LsEntry> {
     let type_char = perms.as_bytes().first()?;
     let size: u64 = parts[4].parse().ok()?;
 
-    // Everything from field 8 onward is the name (may contain spaces or ` -> target`)
-    let name = parts[8..].join(" ");
+    // Everything from field 8 onward is the name (may contain consecutive spaces
+    // or ` -> target`). Slice from the byte offset of field 8 in the original
+    // line so internal spacing survives, rather than collapsing via join.
+    let name = line[nth_field_offset(line, 8)?..].to_string();
 
     // Skip . and ..
     if name == "." || name == ".." {
@@ -115,6 +129,25 @@ fn parse_ls_line(line: &str) -> Option<LsEntry> {
         size,
         name,
     })
+}
+
+/// Byte offset where the `n`th whitespace-delimited field (0-indexed) begins.
+/// Used to recover the filename field verbatim, preserving internal spaces.
+fn nth_field_offset(line: &str, n: usize) -> Option<usize> {
+    let mut field_index = 0;
+    let mut in_field = false;
+    for (i, c) in line.char_indices() {
+        if c.is_whitespace() {
+            in_field = false;
+        } else if !in_field {
+            if field_index == n {
+                return Some(i);
+            }
+            field_index += 1;
+            in_field = true;
+        }
+    }
+    None
 }
 
 fn format_entry(entry: &LsEntry) -> String {
@@ -385,6 +418,47 @@ this is not a valid ls line
         assert_eq!(
             c.normalized_args(&["-l".into(), "--".into(), "-weird-name".into()]),
             vec!["-la", "--", "-weird-name"]
+        );
+    }
+
+    // U15-1: long options that merely contain 'l'/'R' must not be read as short flags.
+    #[test]
+    fn ls_color_long_option_does_not_trigger() {
+        let c = LsCompressor;
+        assert!(!c.can_compress(&["--color".into()]));
+        assert!(!c.can_compress(&["--classify".into()]));
+        assert!(!c.can_compress(&["--all".into()]));
+        assert!(!c.can_compress(&["--full-time".into()]));
+        // long opt alongside a real -l still compresses
+        assert!(c.can_compress(&["--color".into(), "-l".into()]));
+    }
+
+    // U15-2 / U15-3: sort flags and -d are lossy -> decline (passthrough).
+    #[test]
+    fn sort_and_d_flags_decline() {
+        let c = LsCompressor;
+        assert!(!c.can_compress(&["-lt".into()]));
+        assert!(!c.can_compress(&["-lS".into()]));
+        assert!(!c.can_compress(&["-lr".into()]));
+        assert!(!c.can_compress(&["-ld".into()]));
+        assert!(!c.can_compress(&["-l".into(), "-t".into()]));
+        // plain -l / -la must still compress
+        assert!(c.can_compress(&["-l".into()]));
+        assert!(c.can_compress(&["-la".into()]));
+    }
+
+    // U15-4: filenames with consecutive spaces must survive verbatim.
+    #[test]
+    fn multi_space_filename_preserved() {
+        let input = "\
+total 8
+drwxr-xr-x  4 noah  staff  128 Mar 30 10:00 .
+-rw-r--r--  1 noah  staff   52 Mar 28 09:00 a  b.txt\n";
+        let result = compress(input).unwrap();
+        assert!(
+            result.contains("a  b.txt ("),
+            "two-space filename must be preserved; got: {}",
+            result
         );
     }
 }
