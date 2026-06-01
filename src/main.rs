@@ -73,14 +73,14 @@ fn main() {
         (binary_name, args[1..].to_vec())
     };
 
-    // Determine our own binary's directory to skip in PATH lookups
-    let self_dir = env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_default();
+    // Path to our own executable, so PATH lookup can skip it (and any wrapper
+    // symlink pointing at it) without excluding real tools that happen to live
+    // in the same directory — e.g. a brew-installed tool next to a
+    // brew-installed token-saver.
+    let self_exe = env::current_exe().unwrap_or_default();
 
     // Find the real binary
-    let real_binary = match runner::find_real_binary(&command, &self_dir) {
+    let real_binary = match runner::find_real_binary(&command, &self_exe) {
         Some(path) => path,
         None => {
             eprintln!("token-saver: {}: command not found", command);
