@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -18,16 +19,26 @@ pub fn find_real_binary(command_name: &str, self_exe: &Path) -> Option<PathBuf> 
     let path_var = env::var("PATH").ok()?;
     let self_canonical = self_exe.canonicalize().ok();
 
+    // The on-disk file name token-saver's binary always has. A wrapper symlink
+    // (e.g. `rg` -> token-saver) resolves to a file with this name, so matching
+    // it guards against recursing into ourselves even when current_exe() is
+    // unavailable for an exact-path comparison. Falls back to the crate name
+    // when self_exe has no file name (e.g. an empty default path).
+    let self_name = self_exe
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_else(|| OsString::from(env!("CARGO_PKG_NAME")));
+
     for dir in env::split_paths(&path_var) {
         let candidate = dir.join(command_name);
         if !candidate.is_file() {
             continue;
         }
 
-        // Skip only if this candidate IS our own binary, to avoid recursing
-        // into token-saver. Resolve symlinks so a wrapper symlink is caught.
-        if let (Some(me), Ok(resolved)) = (&self_canonical, candidate.canonicalize())
-            && &resolved == me
+        // Skip only if this candidate IS token-saver, to avoid recursing into
+        // ourselves; a real tool sharing our directory must still be returned.
+        if let Ok(resolved) = candidate.canonicalize()
+            && is_token_saver_binary(&resolved, self_canonical.as_deref(), &self_name)
         {
             continue;
         }
@@ -35,6 +46,18 @@ pub fn find_real_binary(command_name: &str, self_exe: &Path) -> Option<PathBuf> 
         return Some(candidate);
     }
     None
+}
+
+/// True if a symlink-resolved PATH candidate is token-saver's own binary, so
+/// executing it would recurse back into token-saver. Matches by canonical path
+/// when we know our own, and always also by the binary's file name so the guard
+/// still holds when current_exe() couldn't be resolved to a canonical path.
+fn is_token_saver_binary(
+    resolved: &Path,
+    self_canonical: Option<&Path>,
+    self_name: &OsStr,
+) -> bool {
+    self_canonical == Some(resolved) || resolved.file_name() == Some(self_name)
 }
 
 /// Execute a command with the given args, capturing stdout and stderr.
@@ -67,33 +90,52 @@ mod tests {
     }
 
     #[test]
-    fn find_binary_skips_only_self_exe() {
-        // If token-saver's own exe path IS the binary we resolve (the legacy
-        // wrapper-symlink recursion case), that exact path must be skipped —
-        // we never return our own binary as the "real" one.
+    fn find_real_tool_is_not_skipped_with_real_self_exe() {
+        // A real tool must still be found when self_exe is a real, distinct,
+        // canonicalizable binary. Using current_exe() (the test binary) means
+        // self_canonical is Some(..) and the file name is not "git", so the
+        // identity check actually runs and returns false — guarding the
+        // brew-shared-directory regression (a passthrough self_exe disabled it).
         let Some(git) = find_real_binary("git", Path::new("/nonexistent")) else {
             return; // no git on this machine
         };
-        if let Some(found) = find_real_binary("git", &git) {
-            assert_ne!(found, git, "must not return the skipped self exe");
-        }
-    }
-
-    #[test]
-    fn find_binary_in_self_exe_dir_is_not_skipped() {
-        // A real tool that shares token-saver's directory must still be found.
-        // Resolve git, then pretend token-saver lives in the same dir under a
-        // different name: the sibling git must still resolve.
-        let Some(git) = find_real_binary("git", Path::new("/nonexistent")) else {
-            return; // no git on this machine
-        };
-        let fake_self = git.parent().unwrap().join("token-saver");
-        let found = find_real_binary("git", &fake_self);
+        let real_self = std::env::current_exe().expect("test exe path");
+        let found = find_real_binary("git", &real_self);
         assert_eq!(
             found.as_deref(),
             Some(git.as_path()),
-            "sharing a directory with token-saver must not exclude a real tool"
+            "a real, unrelated self exe must not exclude a real tool"
         );
+    }
+
+    #[test]
+    fn is_token_saver_binary_matches_exact_path() {
+        let p = Path::new("/opt/homebrew/bin/token-saver");
+        assert!(is_token_saver_binary(p, Some(p), OsStr::new("token-saver")));
+    }
+
+    #[test]
+    fn is_token_saver_binary_matches_by_name_when_self_path_unknown() {
+        // current_exe() unavailable (self_canonical = None): a wrapper symlink
+        // still resolves to a file named token-saver and must be caught, so the
+        // recursion guard holds without an exact-path comparison.
+        let resolved = Path::new("/opt/homebrew/Cellar/token-saver/0.4.0/bin/token-saver");
+        assert!(is_token_saver_binary(
+            resolved,
+            None,
+            OsStr::new("token-saver")
+        ));
+    }
+
+    #[test]
+    fn is_token_saver_binary_allows_unrelated_tool() {
+        let resolved = Path::new("/opt/homebrew/bin/rg");
+        let me = Path::new("/opt/homebrew/bin/token-saver");
+        assert!(!is_token_saver_binary(
+            resolved,
+            Some(me),
+            OsStr::new("token-saver")
+        ));
     }
 
     #[test]
