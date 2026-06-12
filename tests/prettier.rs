@@ -1,5 +1,7 @@
 mod common;
 
+use common::{prettier, scenario_by_name};
+
 fn prettier_available() -> bool {
     std::process::Command::new("prettier")
         .arg("--version")
@@ -14,7 +16,10 @@ fn prettier_check_single_file() {
         eprintln!("Skipping prettier test: prettier not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::prettier::scenarios()[0], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::scenarios(), "Prettier --check single file"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -23,7 +28,10 @@ fn prettier_check_many_files() {
         eprintln!("Skipping prettier test: prettier not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::prettier::scenarios()[1], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::scenarios(), "Prettier --check many files"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -32,7 +40,10 @@ fn prettier_check_nested_dirs() {
         eprintln!("Skipping prettier test: prettier not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::prettier::scenarios()[2], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::scenarios(), "Prettier --check nested dirs"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -41,7 +52,10 @@ fn prettier_check_clean() {
         eprintln!("Skipping prettier test: prettier not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::prettier::scenarios()[3], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::scenarios(), "Prettier --check clean project"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -50,5 +64,8 @@ fn prettier_write_many_files() {
         eprintln!("Skipping prettier test: prettier not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::prettier::scenarios()[4], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::scenarios(), "Prettier --write many files"),
+        &[0, 1],
+    );
 }

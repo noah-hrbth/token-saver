@@ -42,10 +42,21 @@ impl Compressor for GitDiffCompressor {
         }
 
         let tail = &args[1..];
-        !tail.iter().any(|arg| SKIP_FLAGS.contains(&arg.as_str()))
+        if tail.iter().any(|arg| SKIP_FLAGS.contains(&arg.as_str())) {
+            return false;
+        }
+
+        // --stat + -p/--patch combo produces mixed output this compressor can't handle
+        if has_stat_flag(args) && tail.iter().any(|a| a == "-p" || a == "--patch") {
+            return false;
+        }
+
+        true
     }
 
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
+        // stat+patch is already declined by can_compress; the !has_patch guard
+        // keeps normalized_args independent of that invariant
         let has_patch = original_args[1..]
             .iter()
             .any(|a| a == "--patch" || a == "-p");
@@ -351,8 +362,8 @@ mod tests {
         let input = "diff --git a/file.txt b/file.txt\nindex abc..def 100644\n--- a/file.txt\n+++ b/file.txt\n@@ -1,2 +1,3 @@\n line1\n+line2\n line3\n";
         let result = GitDiffCompressor.compress(input, "", 0).unwrap();
         assert!(
-            result.contains("@@ -1 +1\n"),
-            "Expected hunk header without function context in:\n{}",
+            result.contains("@@ -1 +1 @@\n"),
+            "Expected hunk header without function context (with closing @@) in:\n{}",
             result
         );
     }
@@ -418,44 +429,38 @@ mod tests {
     // --- stat mode tests ---
 
     #[test]
-    fn normalized_args_stat_patch_combo_uses_unified_mode() {
-        let args: Vec<String> = vec![
-            "diff".into(),
-            "--stat".into(),
-            "--patch".into(),
-            "HEAD".into(),
-        ];
-        let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(
-            result,
-            vec![
-                "diff",
-                "--unified=1",
-                "--diff-algorithm=histogram",
-                "--no-ext-diff",
-                "--no-color",
-                "--stat",
-                "--patch",
-                "HEAD",
-            ]
+    fn skip_diff_stat_patch_combo() {
+        // --stat + --patch together → passthrough (can_compress must return false)
+        assert!(
+            !GitDiffCompressor.can_compress(&args(&["diff", "--stat", "--patch", "HEAD"])),
+            "--stat + --patch combo should decline compression"
         );
     }
 
     #[test]
-    fn normalized_args_stat_short_patch_combo_uses_unified_mode() {
-        let args: Vec<String> = vec!["diff".into(), "--stat".into(), "-p".into()];
-        let result = GitDiffCompressor.normalized_args(&args);
-        assert_eq!(
-            result,
-            vec![
-                "diff",
-                "--unified=1",
-                "--diff-algorithm=histogram",
-                "--no-ext-diff",
-                "--no-color",
-                "--stat",
-                "-p",
-            ]
+    fn skip_diff_stat_short_patch_combo() {
+        // --stat + -p together → passthrough (can_compress must return false)
+        assert!(
+            !GitDiffCompressor.can_compress(&args(&["diff", "--stat", "-p"])),
+            "--stat + -p combo should decline compression"
+        );
+    }
+
+    #[test]
+    fn can_compress_plain_stat_without_patch() {
+        // --stat alone (no -p/--patch) must still compress
+        assert!(
+            GitDiffCompressor.can_compress(&args(&["diff", "--stat"])),
+            "plain --stat (no patch flag) should still compress"
+        );
+    }
+
+    #[test]
+    fn can_compress_plain_patch_without_stat() {
+        // -p alone (no --stat) must still compress
+        assert!(
+            GitDiffCompressor.can_compress(&args(&["diff", "-p"])),
+            "plain -p (no stat flag) should still compress"
         );
     }
 

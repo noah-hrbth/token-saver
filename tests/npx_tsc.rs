@@ -1,5 +1,7 @@
 mod common;
 
+use common::{scenario_by_name, tsc};
+
 fn npx_tsc_available() -> bool {
     common::tsc::is_available()
 }
@@ -10,7 +12,10 @@ fn npx_tsc_clean() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[0], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(tsc::npx_scenarios(), "npx tsc clean"),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -19,7 +24,10 @@ fn npx_tsc_single_file_errors() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[1], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(tsc::npx_scenarios(), "npx tsc single-file errors"),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -28,7 +36,10 @@ fn npx_tsc_multi_file_errors() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[2], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(tsc::npx_scenarios(), "npx tsc multi-file errors"),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -37,7 +48,10 @@ fn npx_tsc_many_errors() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[3], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(tsc::npx_scenarios(), "npx tsc many errors across files"),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -46,7 +60,13 @@ fn npx_tsc_dedup_heavy() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[4], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            tsc::npx_scenarios(),
+            "npx tsc dedup heavy — 8 identical errors in one file",
+        ),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -55,7 +75,13 @@ fn npx_tsc_chain_errors() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[5], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            tsc::npx_scenarios(),
+            "npx tsc chain errors — interface mismatch with continuations",
+        ),
+        &[0, 1, 2],
+    );
 }
 
 #[test]
@@ -64,5 +90,11 @@ fn npx_tsc_repeated_pattern() {
         eprintln!("Skipping npx tsc test: tsc and npm not available");
         return;
     }
-    common::run_test_with_exit_codes(&common::tsc::npx_scenarios()[6], &[0, 1, 2]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            tsc::npx_scenarios(),
+            "npx tsc repeated pattern — 4 files × 3 identical errors",
+        ),
+        &[0, 1, 2],
+    );
 }

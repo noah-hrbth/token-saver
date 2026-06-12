@@ -85,6 +85,29 @@ pub fn scenarios() -> Vec<Scenario> {
                 Assertion::NotContains("----"),
             ],
         },
+        Scenario {
+            name: "Internal whitespace change not collapsed",
+            command: "git",
+            args: &["diff"],
+            setup: setup_internal_whitespace_change,
+            assertions: vec![
+                // Real content change (internal space removed) must appear in output
+                Assertion::Contains("helloworld"),
+                // Must NOT be collapsed to whitespace-only label
+                Assertion::NotContains("(whitespace changes)"),
+            ],
+        },
+        Scenario {
+            name: "Python indentation change not collapsed",
+            command: "git",
+            args: &["diff"],
+            setup: setup_python_indentation_change,
+            assertions: vec![
+                // Indentation is significant in Python — raw lines must be kept
+                Assertion::Contains("do_thing()"),
+                Assertion::NotContains("(whitespace changes)"),
+            ],
+        },
     ]
 }
 
@@ -211,4 +234,48 @@ fn setup_multiple_files(repo: &Path) {
     // Modify them (unstaged)
     fs::write(repo.join("file_a.txt"), "changed a").unwrap();
     fs::write(repo.join("file_b.txt"), "changed b").unwrap();
+}
+
+fn setup_internal_whitespace_change(repo: &Path) {
+    // Commit a file with an internal space in a string literal
+    fs::write(
+        repo.join("greet.rs"),
+        "fn greet() { let s = \"hello world\"; }\n",
+    )
+    .unwrap();
+    Command::new("git")
+        .args(["add", "greet.rs"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add greet"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    // Remove the internal space — a real content change, not indentation
+    fs::write(
+        repo.join("greet.rs"),
+        "fn greet() { let s = \"helloworld\"; }\n",
+    )
+    .unwrap();
+}
+
+fn setup_python_indentation_change(repo: &Path) {
+    // Commit a Python file, then change only leading indentation
+    fs::write(repo.join("app.py"), "if cond:\n    do_thing()\n").unwrap();
+    Command::new("git")
+        .args(["add", "app.py"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add app"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    // Re-indent the body — semantically significant in Python
+    fs::write(repo.join("app.py"), "if cond:\n        do_thing()\n").unwrap();
 }

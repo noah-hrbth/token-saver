@@ -1,23 +1,34 @@
 mod common;
 
+use common::{grep, scenario_by_name};
+
 #[test]
 fn grep_recursive_multifile_grouping() {
-    common::run_test(&common::grep::scenarios()[0]);
+    common::run_test(&scenario_by_name(
+        grep::scenarios(),
+        "Recursive grep multifile grouping",
+    ));
 }
 
 #[test]
 fn grep_with_context() {
-    common::run_test(&common::grep::scenarios()[1]);
+    common::run_test(&scenario_by_name(grep::scenarios(), "Grep with context"));
 }
 
 #[test]
 fn grep_single_file_no_grouping() {
-    common::run_test(&common::grep::scenarios()[2]);
+    common::run_test(&scenario_by_name(
+        grep::scenarios(),
+        "Grep single file no grouping",
+    ));
 }
 
 #[test]
 fn grep_many_matches_cap() {
-    common::run_test(&common::grep::scenarios()[3]);
+    common::run_test(&scenario_by_name(
+        grep::scenarios(),
+        "Grep many matches cap",
+    ));
 }
 
 #[test]
@@ -31,5 +42,8 @@ fn rg_recursive_multifile_grouping() {
         eprintln!("Skipping rg test: rg not found in PATH");
         return;
     }
-    common::run_test(&common::grep::scenarios()[4]);
+    common::run_test(&scenario_by_name(
+        grep::scenarios(),
+        "rg recursive multifile grouping",
+    ));
 }

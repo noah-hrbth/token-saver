@@ -1,18 +1,26 @@
 mod common;
 
+use common::{git_diff, scenario_by_name};
+
 #[test]
 fn compressed_unstaged_changes() {
-    common::run_test(&common::git_diff::scenarios()[0]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Unstaged working tree changes",
+    ));
 }
 
 #[test]
 fn compressed_staged_changes() {
-    common::run_test(&common::git_diff::scenarios()[1]);
+    common::run_test(&scenario_by_name(git_diff::scenarios(), "Staged changes"));
 }
 
 #[test]
 fn compressed_commit_comparison() {
-    common::run_test(&common::git_diff::scenarios()[2]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Commit-to-commit comparison",
+    ));
 }
 
 #[test]
@@ -30,20 +38,48 @@ fn compressed_clean_repo_diff() {
 
 #[test]
 fn compressed_new_file_staged() {
-    common::run_test(&common::git_diff::scenarios()[3]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "New file added (staged)",
+    ));
 }
 
 #[test]
 fn compressed_deleted_file_staged() {
-    common::run_test(&common::git_diff::scenarios()[4]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "File deleted (staged)",
+    ));
 }
 
 #[test]
 fn compressed_multiple_files() {
-    common::run_test(&common::git_diff::scenarios()[5]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Multiple files changed",
+    ));
 }
 
 #[test]
 fn compressed_diff_stat() {
-    common::run_test(&common::git_diff::scenarios()[6]);
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Diff stat compressed",
+    ));
+}
+
+#[test]
+fn compressed_internal_whitespace_not_collapsed() {
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Internal whitespace change not collapsed",
+    ));
+}
+
+#[test]
+fn compressed_python_indentation_not_collapsed() {
+    common::run_test(&scenario_by_name(
+        git_diff::scenarios(),
+        "Python indentation change not collapsed",
+    ));
 }

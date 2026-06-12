@@ -1,5 +1,7 @@
 mod common;
 
+use common::{eslint, scenario_by_name};
+
 fn eslint_available() -> bool {
     std::process::Command::new("eslint")
         .arg("--version")
@@ -25,7 +27,10 @@ fn eslint_basic_errors() {
         eprintln!("Skipping eslint test: eslint 9+ not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::eslint::scenarios()[0], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(eslint::scenarios(), "ESLint basic errors"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -34,7 +39,10 @@ fn eslint_clean_project() {
         eprintln!("Skipping eslint test: eslint 9+ not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::eslint::scenarios()[1], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(eslint::scenarios(), "ESLint clean project"),
+        &[0, 1],
+    );
 }
 
 #[test]
@@ -43,5 +51,8 @@ fn eslint_warnings_and_errors_grouped() {
         eprintln!("Skipping eslint test: eslint 9+ not found in PATH");
         return;
     }
-    common::run_test_with_exit_codes(&common::eslint::scenarios()[2], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(eslint::scenarios(), "ESLint warnings and errors grouped"),
+        &[0, 1],
+    );
 }

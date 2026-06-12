@@ -1,5 +1,7 @@
 mod common;
 
+use common::{prettier, scenario_by_name};
+
 fn npx_prettier_available() -> bool {
     std::process::Command::new("npx")
         .args(["prettier", "--version"])
@@ -20,29 +22,53 @@ macro_rules! require_npx_prettier {
 #[test]
 fn npx_prettier_check_single_file() {
     require_npx_prettier!();
-    common::run_test_with_exit_codes(&common::prettier::npx_scenarios()[0], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            prettier::npx_scenarios(),
+            "npx prettier --check single file",
+        ),
+        &[0, 1],
+    );
 }
 
 #[test]
 fn npx_prettier_check_many_files() {
     require_npx_prettier!();
-    common::run_test_with_exit_codes(&common::prettier::npx_scenarios()[1], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::npx_scenarios(), "npx prettier --check many files"),
+        &[0, 1],
+    );
 }
 
 #[test]
 fn npx_prettier_check_nested_dirs() {
     require_npx_prettier!();
-    common::run_test_with_exit_codes(&common::prettier::npx_scenarios()[2], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            prettier::npx_scenarios(),
+            "npx prettier --check nested dirs",
+        ),
+        &[0, 1],
+    );
 }
 
 #[test]
 fn npx_prettier_check_clean() {
     require_npx_prettier!();
-    common::run_test_with_exit_codes(&common::prettier::npx_scenarios()[3], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(
+            prettier::npx_scenarios(),
+            "npx prettier --check clean project",
+        ),
+        &[0, 1],
+    );
 }
 
 #[test]
 fn npx_prettier_write_many_files() {
     require_npx_prettier!();
-    common::run_test_with_exit_codes(&common::prettier::npx_scenarios()[4], &[0, 1]);
+    common::run_test_with_exit_codes(
+        &scenario_by_name(prettier::npx_scenarios(), "npx prettier --write many files"),
+        &[0, 1],
+    );
 }

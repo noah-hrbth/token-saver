@@ -1,35 +1,54 @@
 mod common;
 
+use common::{git_branch, scenario_by_name};
 use std::process::Command;
 
 #[test]
 fn compressed_single_branch() {
-    common::run_test(&common::git_branch::scenarios()[0]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "Single branch (only main)",
+    ));
 }
 
 #[test]
 fn compressed_multiple_branches() {
-    common::run_test(&common::git_branch::scenarios()[1]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "Multiple local branches",
+    ));
 }
 
 #[test]
 fn compressed_current_branch_first() {
-    common::run_test(&common::git_branch::scenarios()[2]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "Current branch pinned first",
+    ));
 }
 
 #[test]
 fn compressed_many_branches_cap() {
-    common::run_test(&common::git_branch::scenarios()[3]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "Many branches (60+, triggers cap)",
+    ));
 }
 
 #[test]
 fn compressed_all_branches_with_remote() {
-    common::run_test(&common::git_branch::scenarios()[4]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "All branches with remote",
+    ));
 }
 
 #[test]
 fn compressed_remote_only() {
-    common::run_test(&common::git_branch::scenarios()[5]);
+    common::run_test(&scenario_by_name(
+        git_branch::scenarios(),
+        "Remote branches only",
+    ));
 }
 
 /// U7-1: `git branch feat` must pass through; the branch must actually be created.

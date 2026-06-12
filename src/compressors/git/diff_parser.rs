@@ -208,15 +208,20 @@ pub fn format_file(file: &DiffFile) -> String {
         FileStatus::Normal => output.push_str(&format!("{}\n", file.path)),
     }
 
+    // indentation-significant files (Python, YAML, Makefile) must keep
+    // whitespace-only hunks — leading whitespace there changes semantics
+    let allow_ws_collapse = !is_whitespace_significant_path(&file.path);
     for hunk in &file.hunks {
-        output.push_str(&format_hunk(hunk));
+        output.push_str(&format_hunk(hunk, allow_ws_collapse));
     }
 
     output
 }
 
 /// Format a hunk: compressed header + content lines.
-fn format_hunk(hunk: &Hunk) -> String {
+/// `allow_ws_collapse` gates the whitespace-only collapse; pass false for
+/// files where leading whitespace is semantically significant.
+fn format_hunk(hunk: &Hunk, allow_ws_collapse: bool) -> String {
     let mut output = String::new();
 
     // Hunk header — line numbers without counts
@@ -233,11 +238,11 @@ fn format_hunk(hunk: &Hunk) -> String {
 
     match &hunk.function_context {
         Some(ctx) => output.push_str(&format!("@@ {} {} @@ {}\n", old_part, new_part, ctx)),
-        None => output.push_str(&format!("@@ {} {}\n", old_part, new_part)),
+        None => output.push_str(&format!("@@ {} {} @@\n", old_part, new_part)),
     }
 
-    // Whitespace-only collapse
-    if is_whitespace_only_hunk(hunk) {
+    // Whitespace-only collapse (skipped for indentation-significant files)
+    if allow_ws_collapse && is_whitespace_only_hunk(hunk) {
         output.push_str("(whitespace changes)\n");
         return output;
     }
@@ -254,15 +259,15 @@ fn format_hunk(hunk: &Hunk) -> String {
 }
 
 /// Check if a hunk only contains whitespace changes.
-/// After trimming whitespace, the multiset of removed lines equals the multiset of added lines.
+/// After trimming leading/trailing whitespace, the removed lines equal the added lines in order.
 fn is_whitespace_only_hunk(hunk: &Hunk) -> bool {
     let mut removed: Vec<String> = Vec::new();
     let mut added: Vec<String> = Vec::new();
 
     for line in &hunk.lines {
         match line {
-            DiffLine::Removed(s) => removed.push(s.split_whitespace().collect()),
-            DiffLine::Added(s) => added.push(s.split_whitespace().collect()),
+            DiffLine::Removed(s) => removed.push(s.trim().to_string()),
+            DiffLine::Added(s) => added.push(s.trim().to_string()),
             DiffLine::Context(_) => {}
         }
     }
@@ -271,9 +276,18 @@ fn is_whitespace_only_hunk(hunk: &Hunk) -> bool {
         return false;
     }
 
-    removed.sort();
-    added.sort();
     removed == added
+}
+
+/// File types where leading whitespace is semantically significant, so
+/// indentation-only hunks must NOT be collapsed to "(whitespace changes)".
+fn is_whitespace_significant_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if matches!(name, "Makefile" | "makefile" | "GNUmakefile") {
+        return true;
+    }
+    let ext = name.rsplit('.').next().unwrap_or("");
+    matches!(ext, "py" | "pyi" | "yaml" | "yml" | "mk")
 }
 
 /// Build stat summary line for multi-file diffs.
@@ -491,6 +505,131 @@ mod tests {
                 DiffLine::Removed("old".to_string()),
                 DiffLine::Added("new".to_string()),
             ]
+        );
+    }
+
+    // --- U4-1: internal space change must NOT collapse to "(whitespace changes)" ---
+
+    #[test]
+    fn internal_space_change_not_whitespace_only() {
+        // Removed has internal space; added has no internal space — real content change
+        let hunk = Hunk {
+            old_start: 1,
+            new_start: 1,
+            function_context: None,
+            lines: vec![
+                DiffLine::Removed("    let s = \"hello world\";".to_string()),
+                DiffLine::Added("    let s = \"helloworld\";".to_string()),
+            ],
+        };
+        assert!(
+            !is_whitespace_only_hunk(&hunk),
+            "internal space removal should NOT be labeled whitespace-only"
+        );
+    }
+
+    // --- U4-2: reordered lines must NOT collapse to "(whitespace changes)" ---
+
+    #[test]
+    fn reordered_lines_not_whitespace_only() {
+        // Same lines but swapped order — NOT whitespace-only
+        let hunk = Hunk {
+            old_start: 1,
+            new_start: 1,
+            function_context: None,
+            lines: vec![
+                DiffLine::Removed("use std::io;".to_string()),
+                DiffLine::Removed("use std::fmt;".to_string()),
+                DiffLine::Added("use std::fmt;".to_string()),
+                DiffLine::Added("use std::io;".to_string()),
+            ],
+        };
+        assert!(
+            !is_whitespace_only_hunk(&hunk),
+            "reordered lines should NOT be labeled whitespace-only"
+        );
+    }
+
+    // --- regression guard: pure indentation change STILL collapses ---
+
+    #[test]
+    fn indentation_only_still_whitespace() {
+        // Leading spaces changed, content identical — must still be whitespace-only
+        let hunk = Hunk {
+            old_start: 1,
+            new_start: 1,
+            function_context: None,
+            lines: vec![
+                DiffLine::Removed("    foo();".to_string()),
+                DiffLine::Added("        foo();".to_string()),
+            ],
+        };
+        assert!(
+            is_whitespace_only_hunk(&hunk),
+            "pure indentation change should still be labeled whitespace-only"
+        );
+    }
+
+    // --- U4-4: no-context hunk header must have closing @@ ---
+
+    #[test]
+    fn no_context_hunk_has_closing_at() {
+        let hunk = Hunk {
+            old_start: 1,
+            new_start: 1,
+            function_context: None,
+            lines: vec![
+                DiffLine::Removed("old line".to_string()),
+                DiffLine::Added("new line".to_string()),
+            ],
+        };
+        let output = format_hunk(&hunk, true);
+        assert!(
+            output.contains("@@ -1 +1 @@"),
+            "no-context hunk header must have closing @@, got:\n{}",
+            output
+        );
+    }
+
+    // --- indentation-significant files must NOT collapse whitespace-only hunks ---
+
+    #[test]
+    fn whitespace_significant_path_detection() {
+        assert!(is_whitespace_significant_path("src/app.py"));
+        assert!(is_whitespace_significant_path("types.pyi"));
+        assert!(is_whitespace_significant_path("config/deploy.yaml"));
+        assert!(is_whitespace_significant_path(".github/workflows/ci.yml"));
+        assert!(is_whitespace_significant_path("Makefile"));
+        assert!(is_whitespace_significant_path("build/GNUmakefile"));
+        assert!(is_whitespace_significant_path("rules.mk"));
+        // not whitespace-significant
+        assert!(!is_whitespace_significant_path("src/main.rs"));
+        assert!(!is_whitespace_significant_path("README.md"));
+        assert!(!is_whitespace_significant_path("script.js"));
+    }
+
+    #[test]
+    fn format_hunk_keeps_indentation_change_when_collapse_disabled() {
+        // Pure indentation change that WOULD collapse, but collapse is disabled
+        let hunk = Hunk {
+            old_start: 1,
+            new_start: 1,
+            function_context: None,
+            lines: vec![
+                DiffLine::Removed("    do_thing()".to_string()),
+                DiffLine::Added("        do_thing()".to_string()),
+            ],
+        };
+        let output = format_hunk(&hunk, false);
+        assert!(
+            !output.contains("(whitespace changes)"),
+            "collapse disabled — must keep raw lines, got:\n{}",
+            output
+        );
+        assert!(
+            output.contains("-    do_thing()") && output.contains("+        do_thing()"),
+            "both indentation variants must be preserved, got:\n{}",
+            output
         );
     }
 }

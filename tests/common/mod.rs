@@ -73,6 +73,15 @@ pub struct Scenario {
     pub assertions: Vec<Assertion>,
 }
 
+/// Look up a scenario by name; panics if not found.
+/// Order-independent alternative to indexing `scenarios()[N]`.
+pub fn scenario_by_name(scenarios: Vec<Scenario>, name: &str) -> Scenario {
+    scenarios
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("scenario not found: {name}"))
+}
+
 /// Run a scenario with TOKEN_SAVER=1 and verify assertions.
 pub fn run_test(scenario: &Scenario) {
     run_test_with_exit_codes(scenario, &[0]);
