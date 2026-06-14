@@ -164,10 +164,15 @@ fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()
         .lines()
         .filter(|l| is_token_saver_hook(l.trim_start()))
         .count();
+    // legacy install.sh inlined an `if...fi` block instead of an eval hook
+    let has_legacy_block = existing
+        .lines()
+        .any(|l| l.trim_start().starts_with("# token-saver: wrap commands"));
 
-    // Exactly one hook and it is already canonical — nothing to do.
-    // (Kept strict so this stays a true no-op and converges.)
-    if hook_count == 1 && existing.lines().any(|l| l.trim_start() == canonical) {
+    // Exactly one hook, no legacy block, and it is already canonical — nothing
+    // to do. (Kept strict so this stays a true no-op and converges.)
+    if hook_count == 1 && !has_legacy_block && existing.lines().any(|l| l.trim_start() == canonical)
+    {
         println!(
             "Shell hook already present in {} — skipping",
             path.display()
@@ -175,16 +180,32 @@ fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()
         return Ok(());
     }
 
-    // Any hook present (possibly stale path, legacy `init`, or a duplicate
-    // from an earlier buggy run): rewrite the first hook in place to the
-    // marker comment + canonical line and drop every other token-saver hook
-    // and marker comment. Path-agnostic so it migrates across `brew upgrade`
-    // / reinstall too, and produces the same shape as a fresh install.
-    if hook_count >= 1 {
+    // Any hook or legacy block present (possibly stale path, legacy `init`, a
+    // legacy inlined `if...fi` block, or a duplicate from an earlier buggy
+    // run): rewrite the first hook in place to the marker comment + canonical
+    // line and drop every other token-saver hook, marker comment, and the full
+    // legacy block body. Path-agnostic so it migrates across `brew upgrade` /
+    // reinstall too, and produces the same shape as a fresh install.
+    if hook_count >= 1 || has_legacy_block {
         let mut out: Vec<&str> = Vec::with_capacity(existing.lines().count());
         let mut canonical_emitted = false;
-        for line in existing.lines() {
+        let mut iter = existing.lines();
+        while let Some(line) = iter.next() {
             let trimmed = line.trim_start();
+            // legacy inlined block: drop marker through matching `fi`
+            if trimmed.starts_with("# token-saver: wrap commands") {
+                for inner in iter.by_ref() {
+                    if inner.trim() == "fi" {
+                        break;
+                    }
+                }
+                if !canonical_emitted {
+                    out.push(HOOK_MARKER);
+                    out.push(&canonical);
+                    canonical_emitted = true;
+                }
+                continue;
+            }
             if is_token_saver_hook(trimmed) {
                 if !canonical_emitted {
                     out.push(HOOK_MARKER);
@@ -321,6 +342,60 @@ mod tests {
         // re-running on the upgraded shape is a true no-op
         update_shell_profile(&path, "zsh", BIN).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[test]
+    fn shell_profile_strips_legacy_inlined_block_with_no_eval_hook() {
+        // legacy install.sh inlined the whole if...fi block, no eval hook
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "export FOO=bar\n\
+            # token-saver: wrap commands for LLM output compression\n\
+            # Loads only when TOKEN_SAVER=1 — no-op otherwise.\n\
+            if [ \"$TOKEN_SAVER\" = \"1\" ]; then\n\
+            \x20   git() { /old/path/token-saver git \"$@\"; }\n\
+            \x20   ls() { /old/path/token-saver ls \"$@\"; }\n\
+            fi\n\
+            export BAR=baz\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        let canonical = r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#;
+        assert!(content.contains(canonical));
+        // legacy block body fully gone, no orphaned wrappers
+        assert!(!content.contains("if [ \"$TOKEN_SAVER\" = \"1\" ]; then"));
+        assert!(!content.contains("/old/path/token-saver"));
+        assert!(!content.contains("fi\n"));
+        // exactly one marker comment, user content preserved
+        assert_eq!(content.matches(HOOK_MARKER).count(), 1);
+        assert!(content.contains("export FOO=bar"));
+        assert!(content.contains("export BAR=baz"));
+    }
+
+    #[test]
+    fn shell_profile_strips_legacy_block_when_eval_hook_also_present() {
+        // legacy if...fi block coexisting with a stale eval hook
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "# token-saver: wrap commands for LLM output compression\n\
+            if [ \"$TOKEN_SAVER\" = \"1\" ]; then\n\
+            \x20   git() { /old/path/token-saver git \"$@\"; }\n\
+            fi\n\
+            export FOO=bar\n\
+            eval \"$('/old/path/token-saver' install zsh)\"\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        let canonical = r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#;
+        assert_eq!(content.matches("eval ").count(), 1);
+        assert!(content.contains(canonical));
+        // legacy block body fully removed
+        assert!(!content.contains("if [ \"$TOKEN_SAVER\" = \"1\" ]; then"));
+        assert!(!content.contains("/old/path/token-saver"));
+        assert_eq!(content.matches(HOOK_MARKER).count(), 1);
+        assert!(content.contains("export FOO=bar"));
     }
 
     #[test]

@@ -28,6 +28,14 @@ pub trait Compressor {
     /// Returns None on parse failure (caller falls back to raw output).
     /// exit_code lets the compressor decide whether to skip compression on errors.
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String>;
+
+    /// True if running the normalized command mutates state (e.g. `prettier
+    /// --write`, `jest`). The caller already ran it once to capture output, so on
+    /// a compression miss it must NOT re-exec with the original args — that would
+    /// double the side effect / cost. Read-only commands (default) re-exec safely.
+    fn side_effects(&self) -> bool {
+        false
+    }
 }
 
 /// Look up a compressor for the given command and args.

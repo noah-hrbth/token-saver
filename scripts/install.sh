@@ -45,8 +45,10 @@ add_shell_hook() {
     local shell_name="$2"
 
     # Remove legacy PATH hook from older installs
-    if [ -f "$profile" ] && grep -qF 'token-saver/bin:$PATH' "$profile"; then
-        sed -i.bak '/# token-saver: prepend wrapper/d; /token-saver\/bin:\$PATH/d' "$profile"
+    # match only the legacy comment marker + the line right after it
+    # current-format export line has no such marker, so it is never touched
+    if [ -f "$profile" ] && grep -qF '# token-saver: prepend wrapper' "$profile"; then
+        sed -i.bak '/# token-saver: prepend wrapper/{N;d;}' "$profile"
         rm -f "${profile}.bak"
         echo "  Removed legacy PATH hook from $profile"
     fi

@@ -16,6 +16,11 @@ const SKIP_FLAGS: &[&str] = &[
     "--word-diff",
     "--color",
     "--color=always",
+    // user format overrides — git is last-wins, so these would beat our injected --format
+    "--oneline",
+    // bare --pretty / --format (no '=') pull a default that drops our \x01 marker
+    "--pretty",
+    "--format",
 ];
 
 /// Known git --pretty presets that we can compress.
@@ -116,7 +121,12 @@ impl Compressor for GitShowCompressor {
         let preamble = chunks[0];
         let commit_chunks = &chunks[1..];
 
-        if commit_chunks.is_empty() || commit_chunks.iter().all(|c| c.trim().is_empty()) {
+        // no \x01 marker → not a commit (raw blob/tree); fall back so real content survives
+        if commit_chunks.is_empty() {
+            return None;
+        }
+
+        if commit_chunks.iter().all(|c| c.trim().is_empty()) {
             return Some("(empty)\n".to_string());
         }
 
@@ -141,7 +151,7 @@ impl Compressor for GitShowCompressor {
 
             // Split off diff section
             let (meta, diff_files): (&str, Option<Vec<diff_parser::DiffFile>>) =
-                match chunk.find("\ndiff --git ") {
+                match find_diff_boundary(chunk)? {
                     Some(idx) => {
                         let diff_text = &chunk[idx + 1..];
                         let files = diff_parser::parse_diff(diff_text);
@@ -176,6 +186,63 @@ impl Compressor for GitShowCompressor {
 
         Some(output)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Body / diff boundary
+// ---------------------------------------------------------------------------
+
+/// Lines that immediately follow a real `diff --git a/x b/y` header.
+const DIFF_HEADER_FOLLOWERS: &[&str] = &[
+    "index ",
+    "old mode ",
+    "new mode ",
+    "new file mode ",
+    "deleted file mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "copy from ",
+    "--- ",
+    "Binary files ",
+];
+
+/// Locate where the commit body ends and the patch begins.
+///
+/// Returns:
+/// - `None` (outer `Some(None)`) when the chunk has no patch section
+/// - `Some(idx)` (outer `Some(Some(idx))`) byte offset of the `\n` before the
+///   first genuine `diff --git ` header
+/// - outer `None` to signal the caller must decline (passthrough): combined
+///   merge diffs (`diff --cc` / `diff --combined`) cannot be faithfully parsed
+///
+/// A `diff --git ` line is only treated as the diff boundary when its next line
+/// looks like a real diff header — this stops a commit message that merely
+/// contains the text `diff --git ` from being mistaken for a patch.
+fn find_diff_boundary(chunk: &str) -> Option<Option<usize>> {
+    // combined merge diff → decline; our parser only understands two-sided diffs
+    if chunk.contains("\ndiff --cc ") || chunk.contains("\ndiff --combined ") {
+        return None;
+    }
+
+    let needle = "\ndiff --git ";
+    let mut search_from = 0;
+    while let Some(rel) = chunk[search_from..].find(needle) {
+        let idx = search_from + rel;
+        let after_header = &chunk[idx + 1..];
+        // line right after the "diff --git ..." line must start a real diff header
+        let next_line = after_header.lines().nth(1).unwrap_or("");
+        if DIFF_HEADER_FOLLOWERS
+            .iter()
+            .any(|p| next_line.starts_with(p))
+        {
+            return Some(Some(idx));
+        }
+        // false positive (body text) — keep scanning past this occurrence
+        search_from = idx + needle.len();
+    }
+
+    Some(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +539,23 @@ mod tests {
     }
 
     #[test]
+    fn skip_oneline() {
+        // --oneline would beat our injected --format (git last-wins) → decline
+        assert!(!GitShowCompressor.can_compress(&args(&["show", "--oneline"])));
+    }
+
+    #[test]
+    fn skip_bare_pretty() {
+        // bare --pretty pulls git's default and drops our \x01 marker → decline
+        assert!(!GitShowCompressor.can_compress(&args(&["show", "--pretty"])));
+    }
+
+    #[test]
+    fn skip_bare_format() {
+        assert!(!GitShowCompressor.can_compress(&args(&["show", "--format"])));
+    }
+
+    #[test]
     fn non_show_status() {
         assert!(!GitShowCompressor.can_compress(&args(&["status"])));
     }
@@ -746,6 +830,68 @@ mod tests {
             "Should not have stat summary for single file:\n{}",
             result
         );
+    }
+
+    #[test]
+    fn compress_no_marker_blob_returns_none() {
+        // raw blob/tree output has no \x01 marker → must decline, not emit "(empty)"
+        let raw = "fn main() {\n    println!(\"hello\");\n}\n";
+        assert_eq!(GitShowCompressor.compress(raw, "", 0), None);
+    }
+
+    #[test]
+    fn compress_marker_present_all_empty_returns_empty() {
+        // marker present but no real commit content → genuine "(empty)"
+        let raw = "\x01   ";
+        assert_eq!(
+            GitShowCompressor.compress(raw, "", 0),
+            Some("(empty)\n".to_string())
+        );
+    }
+
+    #[test]
+    fn compress_combined_merge_diff_returns_none() {
+        // merge commit combined diff uses "diff --cc" → cannot parse faithfully → decline
+        let diff_text = concat!(
+            "diff --cc src/main.rs\n",
+            "index abc,def..123\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@@ -1,2 -1,2 +1,3 @@@\n",
+            "  fn main() {\n",
+            "++    merged();\n",
+            "  }\n"
+        );
+        let chunk = make_chunk(
+            "merge12",
+            "",
+            "2024-01-15T10:00:00+00:00",
+            "Alice",
+            "Merge branch",
+            "",
+        );
+        let raw = format!("\x01{}\n{}", chunk, diff_text);
+        assert_eq!(GitShowCompressor.compress(&raw, "", 0), None);
+    }
+
+    #[test]
+    fn compress_body_with_diff_git_text_not_split() {
+        // commit body literally contains a "diff --git " line — must stay in body,
+        // not be parsed as a patch (no real diff header follows it)
+        let body = "Refactor parser.\ndiff --git handling was the bug\nfixed now";
+        let chunk = make_chunk(
+            "a1b2c3f",
+            "",
+            "2024-01-15T10:00:00+00:00",
+            "Alice",
+            "Fix split",
+            body,
+        );
+        let raw = format!("\x01{}", chunk);
+        let result = GitShowCompressor.compress(&raw, "", 0).unwrap();
+        // full body preserved (indented), no spurious file entry
+        assert!(result.contains("  diff --git handling was the bug\n"));
+        assert!(result.contains("  fixed now\n"));
     }
 
     // --- parse_tag_header / format_tag_header ---

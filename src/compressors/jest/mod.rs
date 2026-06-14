@@ -84,15 +84,7 @@ pub(crate) fn has_skip_flag(args: &[String]) -> bool {
     false
 }
 
-/// Returns true when `--coverage` or `--collectCoverage` is present in `args`.
-pub(crate) fn has_coverage_flag(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--coverage" || a == "--collectCoverage")
-}
-
-pub(crate) struct JestCompressor {
-    pub(crate) has_coverage: bool,
-}
+pub(crate) struct JestCompressor;
 
 impl Compressor for JestCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
@@ -118,7 +110,12 @@ impl Compressor for JestCompressor {
     }
 
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
-        compress_jest(stdout, stderr, exit_code, self.has_coverage)
+        compress_jest(stdout, stderr, exit_code)
+    }
+
+    fn side_effects(&self) -> bool {
+        // running the suite is expensive (and may touch snapshots); never re-run
+        true
     }
 }
 
@@ -127,20 +124,13 @@ pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
     if has_skip_flag(args) {
         return None;
     }
-    Some(Box::new(JestCompressor {
-        has_coverage: has_coverage_flag(args),
-    }))
+    Some(Box::new(JestCompressor))
 }
 
 // ── Internal compress logic ───────────────────────────────────────────────────
 
-pub(crate) fn compress_jest(
-    stdout: &str,
-    _stderr: &str,
-    exit_code: i32,
-    has_coverage: bool,
-) -> Option<String> {
-    compress_jest_with_cwd(stdout, exit_code, has_coverage, get_cwd())
+pub(crate) fn compress_jest(stdout: &str, _stderr: &str, exit_code: i32) -> Option<String> {
+    compress_jest_with_cwd(stdout, exit_code, get_cwd())
 }
 
 fn get_cwd() -> Option<String> {
@@ -153,12 +143,7 @@ fn get_cwd() -> Option<String> {
     })
 }
 
-fn compress_jest_with_cwd(
-    stdout: &str,
-    exit_code: i32,
-    has_coverage: bool,
-    cwd: Option<String>,
-) -> Option<String> {
+fn compress_jest_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -> Option<String> {
     // Only handle normal success/failure exit codes.
     if exit_code != 0 && exit_code != 1 {
         return None;
@@ -252,7 +237,9 @@ fn compress_jest_with_cwd(
     }
 
     // ── Coverage table ────────────────────────────────────────────────────────
-    if has_coverage && let Some(coverage_map) = &result.coverage_map {
+    // gate on data presence, not a CLI flag: config `collectCoverage` or
+    // `--coverage=true` populates coverageMap without the bare flag
+    if let Some(coverage_map) = &result.coverage_map {
         let table = render_coverage_table(coverage_map, &cwd);
         if !table.is_empty() {
             parts.push(format!("coverage:\n{}", table));
@@ -279,25 +266,49 @@ fn build_test_name(assertion: &JestAssertionResult) -> String {
     }
 }
 
+/// Returns true when an `at` stack frame points at jest/node internals
+/// rather than user code (node_modules, `node:` builtins, internal/).
+fn is_internal_frame(trimmed_at_line: &str) -> bool {
+    trimmed_at_line.contains("node_modules/")
+        || trimmed_at_line.contains("(node:")
+        || trimmed_at_line.contains("at node:")
+        || trimmed_at_line.contains("internal/")
+}
+
 /// Strips internal stack frames from a jest failure message.
 ///
 /// Jest `--json` `failureMessages` include full stack traces with 10-20 lines
 /// of jest/node internals. The human-readable format hides these. We keep:
 /// - All non-`at` lines (assertion error, Expected/Received, blank lines)
 /// - The first `at` line that points to user code (the test file location)
-/// - Drop all subsequent `at` frames (jest-circus, node internals, etc.)
+/// - Drop all other `at` frames (jest-circus, node internals, etc.)
+///
+/// When no frame points at user code (e.g. an error thrown entirely inside a
+/// dependency) we fall back to the first frame so location is never lost.
 fn strip_stack_trace(message: &str) -> String {
-    let mut result_lines: Vec<&str> = Vec::new();
-    let mut found_first_at = false;
+    let lines: Vec<&str> = message.lines().collect();
 
-    for line in message.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("at ") {
-            if !found_first_at {
+    // index of the at-frame to keep: first user-code frame, else first frame
+    let at_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("at "))
+        .map(|(i, _)| i)
+        .collect();
+
+    let keep_at = at_indices
+        .iter()
+        .copied()
+        .find(|&i| !is_internal_frame(lines[i].trim_start()))
+        .or_else(|| at_indices.first().copied());
+
+    let mut result_lines: Vec<&str> = Vec::new();
+    for (i, &line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("at ") {
+            if Some(i) == keep_at {
                 result_lines.push(line);
-                found_first_at = true;
             }
-            // Drop all subsequent `at` frames.
+            // drop every other `at` frame
         } else {
             result_lines.push(line);
         }
@@ -378,16 +389,18 @@ fn render_inline_groups(groups: &BTreeMap<String, Vec<String>>) -> String {
 
 struct FileCoverage {
     path: String,
-    stmts_pct: f64,
-    branch_pct: f64,
-    funcs_pct: f64,
+    stmts_pct: Option<f64>,
+    branch_pct: Option<f64>,
+    funcs_pct: Option<f64>,
 }
 
-fn pct(covered: u64, total: u64) -> f64 {
+/// Percentage covered, or `None` when the metric is undefined (no entities).
+/// Undefined must not render as a misleading 100%.
+fn pct(covered: u64, total: u64) -> Option<f64> {
     if total == 0 {
-        100.0
+        None
     } else {
-        (covered as f64 / total as f64) * 100.0
+        Some((covered as f64 / total as f64) * 100.0)
     }
 }
 
@@ -447,9 +460,13 @@ fn render_coverage_table(coverage_map: &HashMap<String, Value>, cwd: &Option<Str
     file_coverages.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Only include files that are not fully covered.
+    // an undefined metric (None) does not by itself mark a file incomplete
+    let below_full = |p: &Option<f64>| matches!(p, Some(v) if *v < 100.0);
     let incomplete: Vec<&FileCoverage> = file_coverages
         .iter()
-        .filter(|f| f.stmts_pct < 100.0 || f.branch_pct < 100.0 || f.funcs_pct < 100.0)
+        .filter(|f| {
+            below_full(&f.stmts_pct) || below_full(&f.branch_pct) || below_full(&f.funcs_pct)
+        })
         .collect();
 
     // Compute "All" row totals directly from coverage_map.
@@ -491,7 +508,12 @@ fn render_coverage_table(coverage_map: &HashMap<String, Value>, cwd: &Option<Str
         .max()
         .unwrap_or(4);
 
-    let format_pct = |p: f64| format!("{:.0}%", p);
+    // None -> "-" (undefined metric); never round a sub-100 value up to "100%"
+    let format_pct = |p: Option<f64>| match p {
+        None => "-".to_string(),
+        Some(v) if (99.0..100.0).contains(&v) => "99%".to_string(),
+        Some(v) => format!("{:.0}%", v),
+    };
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -570,8 +592,10 @@ mod tests {
     }
 
     /// Compress with a fake CWD of "/project/".
-    fn compress(json: &str, exit_code: i32, has_coverage: bool) -> Option<String> {
-        compress_jest_with_cwd(json, exit_code, has_coverage, Some("/project/".to_string()))
+    /// `_has_coverage` retained so existing call sites read clearly; coverage is
+    /// now gated on data presence, not a flag.
+    fn compress(json: &str, exit_code: i32, _has_coverage: bool) -> Option<String> {
+        compress_jest_with_cwd(json, exit_code, Some("/project/".to_string()))
     }
 
     // ── Helper builders ───────────────────────────────────────────────────────
@@ -718,57 +742,32 @@ mod tests {
         assert!(!has_skip_flag(&args(&["--coverage", "src/"])));
     }
 
-    // ── has_coverage_flag ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_has_coverage_flag_coverage() {
-        assert!(has_coverage_flag(&args(&["--coverage"])));
-    }
-
-    #[test]
-    fn test_has_coverage_flag_collect_coverage() {
-        assert!(has_coverage_flag(&args(&["--collectCoverage"])));
-    }
-
-    #[test]
-    fn test_has_coverage_flag_absent() {
-        assert!(!has_coverage_flag(&args(&["src/"])));
-    }
-
     // ── normalized_args ───────────────────────────────────────────────────────
 
     #[test]
     fn test_normalized_args_appends_json_and_no_color() {
-        let c = JestCompressor {
-            has_coverage: false,
-        };
+        let c = JestCompressor;
         let result = c.normalized_args(&args(&["src/"]));
         assert_eq!(result, args(&["src/", "--json", "--no-color"]));
     }
 
     #[test]
     fn test_normalized_args_strips_existing_json() {
-        let c = JestCompressor {
-            has_coverage: false,
-        };
+        let c = JestCompressor;
         let result = c.normalized_args(&args(&["--json", "src/"]));
         assert_eq!(result, args(&["src/", "--json", "--no-color"]));
     }
 
     #[test]
     fn test_normalized_args_strips_color_flags() {
-        let c = JestCompressor {
-            has_coverage: false,
-        };
+        let c = JestCompressor;
         let result = c.normalized_args(&args(&["--color", "--colors", "--color=always", "src/"]));
         assert_eq!(result, args(&["src/", "--json", "--no-color"]));
     }
 
     #[test]
     fn test_normalized_args_strips_no_color_then_readds() {
-        let c = JestCompressor {
-            has_coverage: false,
-        };
+        let c = JestCompressor;
         let result = c.normalized_args(&args(&["--no-color", "src/"]));
         assert_eq!(result, args(&["src/", "--json", "--no-color"]));
     }
@@ -972,13 +971,9 @@ mod tests {
                 }
             }
         });
-        let result = compress_jest_with_cwd(
-            &json_val.to_string(),
-            0,
-            true,
-            Some("/project/".to_string()),
-        )
-        .unwrap();
+        let result =
+            compress_jest_with_cwd(&json_val.to_string(), 0, Some("/project/".to_string()))
+                .unwrap();
 
         assert!(result.contains("coverage:"), "should have coverage section");
         assert!(result.contains("Stmts"), "should have coverage header");
@@ -1012,13 +1007,9 @@ mod tests {
                 }
             }
         });
-        let result = compress_jest_with_cwd(
-            &json_val.to_string(),
-            0,
-            true,
-            Some("/project/".to_string()),
-        )
-        .unwrap();
+        let result =
+            compress_jest_with_cwd(&json_val.to_string(), 0, Some("/project/".to_string()))
+                .unwrap();
 
         // Fully covered file should NOT appear as a row.
         assert!(
@@ -1031,7 +1022,9 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_no_coverage_section_without_flag() {
+    fn test_compress_coverage_section_from_data_without_flag() {
+        // coverageMap present (config collectCoverage / --coverage=true) but the
+        // bare CLI flag absent: section must still render (gated on data)
         let json_val = serde_json::json!({
             "success": true,
             "numPassedTests": 1,
@@ -1053,17 +1046,94 @@ mod tests {
                 }
             }
         });
-        let result = compress_jest_with_cwd(
-            &json_val.to_string(),
-            0,
-            false,
-            Some("/project/".to_string()),
-        )
-        .unwrap();
+        let result =
+            compress_jest_with_cwd(&json_val.to_string(), 0, Some("/project/".to_string()))
+                .unwrap();
+
+        assert!(
+            result.contains("coverage:"),
+            "coverage section should appear from data; got: {}",
+            result
+        );
+        // undefined branch/funcs metrics (empty maps) render "-", not "100%"
+        assert!(
+            result.contains('-'),
+            "undefined metric should render '-'; got: {}",
+            result
+        );
+        assert!(
+            !result.contains("100%"),
+            "undefined metric must not render as 100%; got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compress_no_coverage_section_when_map_absent() {
+        // no coverageMap field at all: no coverage section
+        let suite = make_suite(
+            "/project/src/a.test.js",
+            "passed",
+            vec![make_assertion(&[], "t", "passed", &[])],
+        );
+        let json = make_jest_json(true, 1, 0, 0, 0, 1, 0, 1, vec![suite]);
+        let result = compress(&json, 0, false).unwrap();
 
         assert!(
             !result.contains("coverage:"),
-            "coverage section should not appear without flag; got: {}",
+            "coverage section should not appear without coverageMap; got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pct_undefined_when_total_zero() {
+        // undefined metric must be None, never a misleading 100%
+        assert_eq!(pct(0, 0), None);
+        assert_eq!(pct(5, 10), Some(50.0));
+    }
+
+    #[test]
+    fn test_compress_coverage_sub_100_not_rounded_up() {
+        // 199/200 statements = 99.5% must render "99%", not "100%"
+        let mut stmts = serde_json::Map::new();
+        for i in 0..200u64 {
+            // first entry uncovered (0), rest covered (1)
+            stmts.insert(i.to_string(), serde_json::json!(if i == 0 { 0 } else { 1 }));
+        }
+        let json_val = serde_json::json!({
+            "success": true,
+            "numPassedTests": 1,
+            "numFailedTests": 0,
+            "numPendingTests": 0,
+            "numTodoTests": 0,
+            "numPassedTestSuites": 1,
+            "numFailedTestSuites": 0,
+            "numTotalTestSuites": 1,
+            "testResults": [],
+            "coverageMap": {
+                "/project/src/big.js": {
+                    "s": stmts,
+                    "b": {},
+                    "f": {},
+                    "statementMap": {},
+                    "branchMap": {},
+                    "fnMap": {}
+                }
+            }
+        });
+        let result =
+            compress_jest_with_cwd(&json_val.to_string(), 0, Some("/project/".to_string()))
+                .unwrap();
+
+        assert!(
+            result.contains("99%"),
+            "99.5% should floor to 99%; got: {}",
+            result
+        );
+        assert!(
+            !result.contains("100%"),
+            "sub-100 value must not round up to 100%; got: {}",
             result
         );
     }
@@ -1156,6 +1226,42 @@ mod tests {
     fn test_strip_stack_trace_no_at_lines() {
         let msg = "Expected: 1\nReceived: 2";
         assert_eq!(strip_stack_trace(msg), msg);
+    }
+
+    #[test]
+    fn test_strip_stack_trace_prefers_user_frame_over_internal_first() {
+        // internal frame appears first; user-code frame second
+        let msg = "Error: boom\n    at throwIt (node_modules/lib/index.js:5:7)\n    at Object.<anonymous> (src/math.test.js:8:25)\n    at _runTest (node_modules/jest-circus/build/run.js:789)";
+        let stripped = strip_stack_trace(msg);
+
+        assert!(
+            stripped.contains("at Object.<anonymous> (src/math.test.js:8:25)"),
+            "should keep first user-code frame; got: {}",
+            stripped
+        );
+        assert!(
+            !stripped.contains("node_modules"),
+            "should drop all internal frames; got: {}",
+            stripped
+        );
+    }
+
+    #[test]
+    fn test_strip_stack_trace_falls_back_to_first_when_all_internal() {
+        // no user-code frame: keep the first frame so location isn't lost
+        let msg = "Error: boom\n    at deep (node_modules/lib/a.js:1:1)\n    at deeper (node_modules/lib/b.js:2:2)";
+        let stripped = strip_stack_trace(msg);
+
+        assert!(
+            stripped.contains("at deep (node_modules/lib/a.js:1:1)"),
+            "should keep first frame as fallback; got: {}",
+            stripped
+        );
+        assert!(
+            !stripped.contains("b.js:2:2"),
+            "should drop subsequent frames; got: {}",
+            stripped
+        );
     }
 
     #[test]

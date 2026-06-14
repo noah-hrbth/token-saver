@@ -15,15 +15,47 @@ const SKIP_FLAGS: &[&str] = &[
 
 const MAX_MATCHES: usize = 200;
 
+/// True if `line` is a binary-match notice from GNU grep (`Binary file <p> matches`)
+/// or ripgrep (`<p>: binary file matches (found ...)`).
+fn is_binary_match_notice(line: &str) -> bool {
+    (line.starts_with("Binary file ") && line.ends_with(" matches"))
+        || line.contains(": binary file matches")
+}
+
+/// Args-derived hints that decide how to parse output. Carried on the compressor
+/// because the `compress` trait method has no access to the original args.
+#[derive(Default)]
+struct FormatHints {
+    /// `-n`/`--line-number` requested -> line numbers are present in output
+    line_numbers: bool,
+    /// filename prefix present (`-H`, `-r`/`-R`/`--recursive`, multiple file operands)
+    multi_file: bool,
+    /// known single-file invocation (exactly one file operand, no -H/-r) -> no prefix.
+    /// disambiguates `multi_file == false`: when true the format is settled (single
+    /// file), so match content like `word: rest` is never misread as a filename.
+    single_file_known: bool,
+}
+
 /// Compressor for `grep` output. Groups matches by file with indented, aligned line numbers.
-pub struct GrepCompressor;
+#[derive(Default)]
+pub struct GrepCompressor {
+    hints: FormatHints,
+}
 
 /// Compressor for `rg` (ripgrep) output. Same grouping logic, different normalized args.
-pub struct RgCompressor;
+#[derive(Default)]
+pub struct RgCompressor {
+    hints: FormatHints,
+}
 
 impl Compressor for GrepCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
-        !args.iter().any(|a| SKIP_FLAGS.contains(&a.as_str()))
+        if args.iter().any(|a| SKIP_FLAGS.contains(&a.as_str())) {
+            return false;
+        }
+        // decline stdin mode: Command::output() gives the child null stdin, so
+        // `ps aux | grep node` reads EOF and we'd report "0 matches" — passthrough
+        has_file_operands(args)
     }
 
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
@@ -33,13 +65,16 @@ impl Compressor for GrepCompressor {
     }
 
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
-        compress_grep_output(stdout, stderr, exit_code)
+        compress_grep_output(stdout, stderr, exit_code, &self.hints)
     }
 }
 
 impl Compressor for RgCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
-        !args.iter().any(|a| SKIP_FLAGS.contains(&a.as_str()))
+        if args.iter().any(|a| SKIP_FLAGS.contains(&a.as_str())) {
+            return false;
+        }
+        has_file_operands(args)
     }
 
     fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
@@ -49,13 +84,16 @@ impl Compressor for RgCompressor {
     }
 
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
-        compress_grep_output(stdout, stderr, exit_code)
+        compress_grep_output(stdout, stderr, exit_code, &self.hints)
     }
 }
 
 /// Find a compressor for the given grep args.
 pub fn find_grep_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
-    let compressor = GrepCompressor;
+    // grep is not recursive unless asked (-r/-R); a single operand means a single file
+    let compressor = GrepCompressor {
+        hints: format_hints(args, false),
+    };
     if compressor.can_compress(args) {
         Some(Box::new(compressor))
     } else {
@@ -65,12 +103,181 @@ pub fn find_grep_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
 
 /// Find a compressor for the given rg args.
 pub fn find_rg_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
-    let compressor = RgCompressor;
+    // rg recurses into a directory operand by default -> a dir operand is multi-file
+    let compressor = RgCompressor {
+        hints: format_hints(args, true),
+    };
     if compressor.can_compress(args) {
         Some(Box::new(compressor))
     } else {
         None
     }
+}
+
+/// Short flags whose value is the next argument (so that value isn't miscounted
+/// as a file operand). Covers GNU grep + ripgrep common value-taking options.
+const VALUE_FLAGS: &[&str] = &[
+    "-e",
+    "-f",
+    "-m",
+    "-A",
+    "-B",
+    "-C",
+    "-d",
+    "--regexp",
+    "--file",
+    "--max-count",
+    "--after-context",
+    "--before-context",
+    "--context",
+];
+
+/// Long flags that supply the pattern (so the first positional is a file, not the pattern).
+const PATTERN_LONG_FLAGS: &[&str] = &["--regexp", "--file"];
+
+/// Scan of `args` into the operands grep/rg will read. `pattern_from_flag` is true
+/// when `-e`/`-f`/`--regexp`/`--file` supplied the pattern (so no positional is
+/// consumed as the pattern). `forces_filename` is true when `-H`/`-r`/`-R`/
+/// `--recursive`/`--with-filename` was given. `has_line_numbers` tracks `-n`.
+struct ArgScan<'a> {
+    positionals: Vec<&'a str>,
+    pattern_from_flag: bool,
+    forces_filename: bool,
+    has_line_numbers: bool,
+}
+
+/// Walk args once, classifying flags and collecting positionals. Shared by the
+/// stdin-mode check and the format-hint derivation so both agree on what counts.
+fn scan_args(args: &[String]) -> ArgScan<'_> {
+    let mut scan = ArgScan {
+        positionals: Vec::new(),
+        pattern_from_flag: false,
+        forces_filename: false,
+        has_line_numbers: false,
+    };
+    let mut after_double_dash = false;
+    let mut skip_next = false;
+
+    for arg in args {
+        let arg = arg.as_str();
+        if skip_next {
+            // value belonging to the previous flag (e.g. -A 1) — not an operand
+            skip_next = false;
+            continue;
+        }
+        if after_double_dash {
+            scan.positionals.push(arg);
+            continue;
+        }
+        match arg {
+            "--" => {
+                after_double_dash = true;
+                continue;
+            }
+            "-" => {
+                // explicit stdin operand
+                scan.positionals.push(arg);
+                continue;
+            }
+            "-n" | "--line-number" => {
+                scan.has_line_numbers = true;
+                continue;
+            }
+            "-H" | "--with-filename" | "-r" | "-R" | "--recursive" => {
+                scan.forces_filename = true;
+                continue;
+            }
+            _ => {}
+        }
+        if arg.starts_with("--") {
+            if let Some((name, _)) = arg.split_once('=') {
+                if PATTERN_LONG_FLAGS.contains(&name) {
+                    scan.pattern_from_flag = true;
+                }
+            } else {
+                if PATTERN_LONG_FLAGS.contains(&arg) {
+                    scan.pattern_from_flag = true;
+                }
+                if VALUE_FLAGS.contains(&arg) {
+                    skip_next = true;
+                }
+            }
+            continue;
+        }
+        if let Some(letters) = arg.strip_prefix('-') {
+            // bundled short flags
+            if letters.contains('n') {
+                scan.has_line_numbers = true;
+            }
+            if letters.contains('H') || letters.contains('r') || letters.contains('R') {
+                scan.forces_filename = true;
+            }
+            if letters.contains('e') || letters.contains('f') {
+                scan.pattern_from_flag = true;
+            }
+            if VALUE_FLAGS.contains(&arg) {
+                skip_next = true;
+            }
+            continue;
+        }
+        scan.positionals.push(arg);
+    }
+
+    scan
+}
+
+/// The file/dir operands grep/rg will read (the pattern positional removed unless
+/// supplied by flag). A lone `-` stays in the list and is treated as stdin.
+fn file_operands<'a>(scan: &ArgScan<'a>) -> Vec<&'a str> {
+    if scan.pattern_from_flag {
+        scan.positionals.clone()
+    } else {
+        // first positional is the pattern; the rest are files
+        scan.positionals.iter().skip(1).copied().collect()
+    }
+}
+
+/// Returns true if args name at least one real file/dir operand (not stdin).
+/// Declines stdin mode (`ps aux | grep node`), which under captured execution
+/// reads EOF and would falsely report zero matches.
+fn has_file_operands(args: &[String]) -> bool {
+    let scan = scan_args(args);
+    file_operands(&scan).iter().any(|p| *p != "-")
+}
+
+/// Derive parse hints from the invocation args. `recursive_by_default` is true
+/// for rg (a directory operand is searched recursively -> multi-file output).
+fn format_hints(args: &[String], recursive_by_default: bool) -> FormatHints {
+    let scan = scan_args(args);
+    let real_files: Vec<&str> = file_operands(&scan)
+        .into_iter()
+        .filter(|p| *p != "-")
+        .collect();
+
+    let mut hints = FormatHints {
+        line_numbers: scan.has_line_numbers,
+        multi_file: scan.forces_filename,
+        single_file_known: false,
+    };
+
+    // multiple operands always yield filename prefixes
+    if real_files.len() > 1 {
+        hints.multi_file = true;
+    }
+
+    // a single operand: filename prefix appears only if it's a directory (recursive)
+    if !hints.multi_file && real_files.len() == 1 {
+        let is_dir = std::path::Path::new(real_files[0]).is_dir();
+        if recursive_by_default && is_dir {
+            // rg recurses the dir -> multi-file with prefixes
+            hints.multi_file = true;
+        } else if !is_dir {
+            // a single regular file -> no prefix; format is settled as single-file
+            hints.single_file_known = true;
+        }
+    }
+
+    hints
 }
 
 /// Detected output format, used to select the correct parse strategy.
@@ -119,20 +326,32 @@ enum GroupLine {
 }
 
 /// Shared compression logic for both grep and rg output.
-fn compress_grep_output(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
+fn compress_grep_output(
+    stdout: &str,
+    stderr: &str,
+    exit_code: i32,
+    hints: &FormatHints,
+) -> Option<String> {
     // Step 1: exit code handling
     match exit_code {
         0 | 1 => {}
         _ => return None,
     }
 
-    // Step 2: empty output
+    // Step 2: empty output — surface stderr so errors/warnings aren't lost
     if stdout.trim().is_empty() {
-        return Some(String::new());
+        if stderr.is_empty() {
+            return Some(String::new());
+        }
+        let mut output = String::from("errors:");
+        for line in stderr.lines() {
+            output.push_str(&format!("\n  {}", line));
+        }
+        return Some(output);
     }
 
     // Step 3: detect format
-    let format = detect_format(stdout);
+    let format = detect_format(stdout, hints);
 
     // Step 4: parse into file groups
     let groups = match format {
@@ -178,18 +397,40 @@ fn compress_grep_output(stdout: &str, stderr: &str, exit_code: i32) -> Option<St
     Some(output)
 }
 
-/// Detect the output format by finding the first match line (with `:` separator).
-/// Skips context lines (which use `-` separator) so that `-B`/`-C` flags don't
-/// confuse detection.
-fn detect_format(stdout: &str) -> OutputFormat {
+/// Detect the output format. The args-derived `hints` are authoritative for
+/// WHETHER filenames / line numbers are present (so match content that merely
+/// looks like `digits:` or `word: rest` isn't misread). Content sniffing is only
+/// the fallback when no hints were supplied (e.g. a bare invocation).
+fn detect_format(stdout: &str, hints: &FormatHints) -> OutputFormat {
+    // hints settle the format unambiguously when set
+    if hints.multi_file {
+        return if hints.line_numbers {
+            OutputFormat::MultiFileWithNums
+        } else {
+            OutputFormat::MultiFileNoNums
+        };
+    }
+    if hints.single_file_known {
+        // single file, no prefix: content's colons/digits are not filename/linenum
+        return if hints.line_numbers {
+            OutputFormat::SingleFileWithNums
+        } else {
+            OutputFormat::SingleFileNoNums
+        };
+    }
+    if hints.line_numbers {
+        // single file (no filename prefix) but -n requested
+        return OutputFormat::SingleFileWithNums;
+    }
+
+    // no hints — fall back to sniffing the first match line (with `:` separator),
+    // skipping context lines (`-` separator) so -B/-C don't confuse detection
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == "--" || trimmed.starts_with("Binary file ") {
+        if trimmed.is_empty() || trimmed == "--" || is_binary_match_notice(trimmed) {
             continue;
         }
 
-        // Skip lines without ':' — these are context lines or plain content.
-        // We need a match line (which always uses ':') to detect the format.
         let Some(colon_pos) = line.find(':') else {
             continue;
         };
@@ -222,19 +463,19 @@ fn compress_single_file(stdout: &str) -> (String, usize) {
     let mut capped = false;
     let mut cut_byte_offset = 0usize;
 
-    for line in stdout.lines() {
-        let is_match = is_single_file_match(line);
-
-        if is_match {
+    // split_inclusive keeps each line's real terminator (`\n` or `\r\n`), so the
+    // accumulated offset always lands on a true line boundary — never mid-line or
+    // mid multi-byte char (which `line.len() + 1` undercounts on CRLF -> panic)
+    for chunk in stdout.split_inclusive('\n') {
+        let line = chunk.trim_end_matches(['\r', '\n']);
+        if is_single_file_match(line) {
             if match_count >= MAX_MATCHES {
                 capped = true;
                 break;
             }
             match_count += 1;
         }
-
-        // Track byte offset past this line (including the newline separator)
-        cut_byte_offset += line.len() + 1;
+        cut_byte_offset += chunk.len();
     }
 
     if !capped {
@@ -278,7 +519,7 @@ fn parse_multi_file_line_with_nums(
         return Some(ParsedLine::Separator);
     }
 
-    if line.starts_with("Binary file ") && line.ends_with(" matches") {
+    if is_binary_match_notice(line) {
         return Some(ParsedLine::Binary {
             raw: line.to_string(),
         });
@@ -308,7 +549,13 @@ fn parse_multi_file_line_with_nums(
     }
 
     // Match line: find first ':', everything before is filename.
-    let colon1 = line.find(':')?;
+    // A context line for a *different* file (`newfile-num-content`) has no ':' in
+    // its `file-num-` prefix; recognize it so we neither drop it nor fabricate a
+    // filename out of match content.
+    let colon1 = match line.find(':') {
+        Some(pos) => pos,
+        None => return parse_new_file_context_with_nums(line),
+    };
     let filename = &line[..colon1];
     let after1 = &line[colon1 + 1..];
 
@@ -326,6 +573,12 @@ fn parse_multi_file_line_with_nums(
         }
     }
 
+    // No second ':' -> not a real `file:num:` match. It may be a new-file context
+    // line whose content happens to contain a ':' (e.g. `newfile-12-foo: bar`).
+    if let Some(parsed) = parse_new_file_context_with_nums(line) {
+        return Some(parsed);
+    }
+
     // Fallback: treat as match without line number
     Some(ParsedLine::Match {
         file: filename.to_string(),
@@ -334,13 +587,49 @@ fn parse_multi_file_line_with_nums(
     })
 }
 
+/// Parse a new-file context line `filename-linenum-content` (different file than
+/// `current_file`). Anchors on the first `-<digits>-` whose filename part has no
+/// ':' (a real match line would put its ':' before any content). Returns None if
+/// the line doesn't fit this shape.
+fn parse_new_file_context_with_nums(line: &str) -> Option<ParsedLine> {
+    let bytes = line.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = line[search_from..].find('-') {
+        let dash1 = search_from + rel;
+        let filename = &line[..dash1];
+        // a real match's ':' precedes content; reject if filename part holds one
+        if filename.is_empty() || filename.contains(':') {
+            return None;
+        }
+        let after = &line[dash1 + 1..];
+        if let Some(dash2_rel) = after.find('-') {
+            let num_str = &after[..dash2_rel];
+            if !num_str.is_empty() && num_str.bytes().all(|b| b.is_ascii_digit()) {
+                let line_num: u64 = num_str.parse().ok()?;
+                let content = after[dash2_rel + 1..].to_string();
+                return Some(ParsedLine::Context {
+                    file: filename.to_string(),
+                    line_num: Some(line_num),
+                    content,
+                });
+            }
+        }
+        // advance past this dash and retry (filename may contain '-')
+        search_from = dash1 + 1;
+        if search_from >= bytes.len() {
+            break;
+        }
+    }
+    None
+}
+
 /// Parse a multi-file line without line numbers: `filename:content` or `filename-content`.
 fn parse_multi_file_line_no_nums(line: &str, current_file: &Option<String>) -> Option<ParsedLine> {
     if line == "--" {
         return Some(ParsedLine::Separator);
     }
 
-    if line.starts_with("Binary file ") && line.ends_with(" matches") {
+    if is_binary_match_notice(line) {
         return Some(ParsedLine::Binary {
             raw: line.to_string(),
         });
@@ -748,59 +1037,65 @@ mod tests {
     }
 
     fn compress(stdout: &str) -> Option<String> {
-        compress_grep_output(stdout, "", 0)
+        compress_grep_output(stdout, "", 0, &FormatHints::default())
+    }
+
+    fn compress_with_hints(stdout: &str, hints: &FormatHints) -> Option<String> {
+        compress_grep_output(stdout, "", 0, hints)
     }
 
     // --- can_compress ---
 
     #[test]
     fn can_compress_bare_args() {
-        assert!(GrepCompressor.can_compress(&args(&["-rn", "pattern", "."])));
+        assert!(GrepCompressor::default().can_compress(&args(&["-rn", "pattern", "."])));
     }
 
     #[test]
     fn can_compress_skip_files_with_matches() {
-        assert!(!GrepCompressor.can_compress(&args(&["-l", "pattern", "."])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["-l", "pattern", "."])));
     }
 
     #[test]
     fn can_compress_skip_long_files_with_matches() {
-        assert!(!GrepCompressor.can_compress(&args(&["--files-with-matches", "pattern"])));
+        assert!(
+            !GrepCompressor::default().can_compress(&args(&["--files-with-matches", "pattern"]))
+        );
     }
 
     #[test]
     fn can_compress_skip_count() {
-        assert!(!GrepCompressor.can_compress(&args(&["-c", "pattern", "."])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["-c", "pattern", "."])));
     }
 
     #[test]
     fn can_compress_skip_long_count() {
-        assert!(!GrepCompressor.can_compress(&args(&["--count", "pattern"])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["--count", "pattern"])));
     }
 
     #[test]
     fn can_compress_skip_json() {
-        assert!(!GrepCompressor.can_compress(&args(&["--json", "pattern"])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["--json", "pattern"])));
     }
 
     #[test]
     fn can_compress_skip_null() {
-        assert!(!GrepCompressor.can_compress(&args(&["-Z", "pattern", "."])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["-Z", "pattern", "."])));
     }
 
     #[test]
     fn can_compress_skip_long_null() {
-        assert!(!GrepCompressor.can_compress(&args(&["--null", "pattern"])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["--null", "pattern"])));
     }
 
     #[test]
     fn can_compress_skip_quiet() {
-        assert!(!GrepCompressor.can_compress(&args(&["-q", "pattern", "."])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["-q", "pattern", "."])));
     }
 
     #[test]
     fn can_compress_skip_long_quiet() {
-        assert!(!GrepCompressor.can_compress(&args(&["--quiet", "pattern"])));
+        assert!(!GrepCompressor::default().can_compress(&args(&["--quiet", "pattern"])));
     }
 
     // --- normalized_args ---
@@ -808,7 +1103,7 @@ mod tests {
     #[test]
     fn normalized_args_grep_adds_color_never() {
         let input = args(&["-rn", "pattern", "."]);
-        let result = GrepCompressor.normalized_args(&input);
+        let result = GrepCompressor::default().normalized_args(&input);
         assert_eq!(result[0], "--color=never");
         assert_eq!(&result[1..], &input[..]);
     }
@@ -816,10 +1111,28 @@ mod tests {
     #[test]
     fn normalized_args_rg_adds_no_heading_and_color_never() {
         let input = args(&["-n", "pattern", "src/"]);
-        let result = RgCompressor.normalized_args(&input);
+        let result = RgCompressor::default().normalized_args(&input);
         assert_eq!(result[0], "--no-heading");
         assert_eq!(result[1], "--color=never");
         assert_eq!(&result[2..], &input[..]);
+    }
+
+    // --- format_hints (args -> parse hints) ---
+
+    #[test]
+    fn format_hints_recursive_no_n_is_multi_file_no_nums() {
+        // -r forces filename prefix; absence of -n means no line numbers
+        let hints = format_hints(&args(&["-r", "pat", "."]), false);
+        assert!(hints.multi_file);
+        assert!(!hints.line_numbers);
+        assert!(!hints.single_file_known);
+    }
+
+    #[test]
+    fn format_hints_two_files_is_multi_file() {
+        // multiple operands always produce filename prefixes
+        let hints = format_hints(&args(&["pat", "a.rs", "b.rs"]), false);
+        assert!(hints.multi_file);
     }
 
     // --- compress ---
@@ -955,33 +1268,38 @@ mod tests {
 
     #[test]
     fn compress_stderr_appended() {
-        let result =
-            compress_grep_output("src/a.rs:1:hello\n", "grep: error reading file\n", 0).unwrap();
+        let result = compress_grep_output(
+            "src/a.rs:1:hello\n",
+            "grep: error reading file\n",
+            0,
+            &FormatHints::default(),
+        )
+        .unwrap();
         assert!(result.contains("errors:"));
         assert!(result.contains("  grep: error reading file"));
     }
 
     #[test]
     fn compress_exit_0() {
-        let result = compress_grep_output("src/a.rs:1:foo\n", "", 0);
+        let result = compress_grep_output("src/a.rs:1:foo\n", "", 0, &FormatHints::default());
         assert!(result.is_some());
     }
 
     #[test]
     fn compress_exit_1_no_matches() {
-        let result = compress_grep_output("", "", 1);
+        let result = compress_grep_output("", "", 1, &FormatHints::default());
         assert_eq!(result, Some(String::new()));
     }
 
     #[test]
     fn compress_exit_2_returns_none() {
-        let result = compress_grep_output("", "grep: invalid option", 2);
+        let result = compress_grep_output("", "grep: invalid option", 2, &FormatHints::default());
         assert_eq!(result, None);
     }
 
     #[test]
     fn compress_empty_stdout() {
-        let result = compress_grep_output("", "", 0);
+        let result = compress_grep_output("", "", 0, &FormatHints::default());
         assert_eq!(result, Some(String::new()));
     }
 
@@ -1068,5 +1386,161 @@ mod tests {
         // Emitted match lines: lines containing ": line " that are indented
         let emitted = result.lines().filter(|l| l.contains(": line ")).count();
         assert_eq!(emitted, MAX_MATCHES);
+    }
+
+    // --- fix: decline stdin mode (no file operands) ---
+
+    #[test]
+    fn can_compress_declines_stdin_pattern_only() {
+        // `ps aux | grep node` — pattern but no file operand -> reads stdin -> decline
+        assert!(!GrepCompressor::default().can_compress(&args(&["node"])));
+        assert!(!RgCompressor::default().can_compress(&args(&["node"])));
+    }
+
+    #[test]
+    fn can_compress_declines_explicit_dash_stdin() {
+        // lone `-` operand is stdin, not a file
+        assert!(!GrepCompressor::default().can_compress(&args(&["pattern", "-"])));
+    }
+
+    #[test]
+    fn can_compress_accepts_pattern_with_file() {
+        assert!(GrepCompressor::default().can_compress(&args(&["pattern", "file.rs"])));
+    }
+
+    #[test]
+    fn can_compress_accepts_pattern_via_e_flag_with_file() {
+        // -e supplies the pattern, so the lone positional is a file operand
+        assert!(GrepCompressor::default().can_compress(&args(&["-e", "pat", "file.rs"])));
+        // -e with no file -> stdin -> decline
+        assert!(!GrepCompressor::default().can_compress(&args(&["-e", "pat"])));
+    }
+
+    // --- fix: empty stdout must surface stderr ---
+
+    #[test]
+    fn compress_empty_stdout_with_stderr_surfaces_errors() {
+        // no matches but a real error must not be discarded as Some("")
+        let result = compress_grep_output(
+            "",
+            "grep: foo: No such file or directory\n",
+            1,
+            &FormatHints::default(),
+        )
+        .unwrap();
+        assert!(result.contains("errors:"));
+        assert!(result.contains("  grep: foo: No such file or directory"));
+    }
+
+    // --- fix: detect_format relies on args, not content sniffing ---
+
+    #[test]
+    fn detect_format_no_n_flag_keeps_digit_prefixed_content() {
+        // recursive grep WITHOUT -n; content begins with `12:` — must NOT become a line number
+        let stdout = "src/a.rs:12: o'clock note\n";
+        let hints = FormatHints {
+            line_numbers: false,
+            multi_file: true,
+            single_file_known: false,
+        };
+        let result = compress_with_hints(stdout, &hints).unwrap();
+        // content `12: o'clock note` preserved verbatim (no fake line-number column)
+        assert!(
+            result.contains("12: o'clock note"),
+            "expected raw content kept, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_format_single_file_word_colon_not_treated_as_filename() {
+        // single file, no -n, no prefix; content `word: rest` must stay content
+        let stdout = "warning: deprecated call\n";
+        let hints = FormatHints {
+            line_numbers: false,
+            multi_file: false,
+            single_file_known: true,
+        };
+        let result = compress_with_hints(stdout, &hints).unwrap();
+        // whole line preserved; not split into filename `warning` + match
+        assert_eq!(result, "warning: deprecated call");
+    }
+
+    // --- fix: ripgrep binary-match notice recognized ---
+
+    #[test]
+    fn binary_notice_recognizes_ripgrep_format() {
+        assert!(is_binary_match_notice(
+            "src/data.bin: binary file matches (found \"\\0\" byte around offset 10)"
+        ));
+        assert!(is_binary_match_notice("Binary file image.png matches"));
+        assert!(!is_binary_match_notice("src/main.rs:5:fn main() {"));
+    }
+
+    #[test]
+    fn compress_ripgrep_binary_match_preserved() {
+        let stdout = "src/data.bin: binary file matches (found \"\\0\" byte around offset 10)\n";
+        let hints = FormatHints {
+            line_numbers: true,
+            multi_file: true,
+            single_file_known: false,
+        };
+        let result = compress_with_hints(stdout, &hints).unwrap();
+        assert!(
+            result.contains("binary file matches"),
+            "binary notice lost, got: {result:?}"
+        );
+    }
+
+    // --- fix: context line for a NEW file is not dropped/fabricated ---
+
+    #[test]
+    fn context_line_for_new_file_assigned_correctly() {
+        // -B context for b.rs precedes its match; current_file is still a.rs.
+        // The new-file context must group under b.rs, not corrupt a.rs or drop.
+        let stdout = concat!(
+            "a.rs:5:alpha\n",
+            "b.rs-9-before context\n",
+            "b.rs:10:beta\n"
+        );
+        let hints = FormatHints {
+            line_numbers: true,
+            multi_file: true,
+            single_file_known: false,
+        };
+        let result = compress_with_hints(stdout, &hints).unwrap();
+        // both files present, context content kept, no bogus `b.rs-9` filename group
+        assert!(result.contains("a.rs"), "missing a.rs: {result:?}");
+        assert!(result.contains("b.rs"), "missing b.rs: {result:?}");
+        assert!(
+            result.contains("before context"),
+            "context dropped: {result:?}"
+        );
+        assert!(
+            !result.contains("b.rs-9"),
+            "fabricated filename group: {result:?}"
+        );
+    }
+
+    // --- fix: CRLF / multi-byte offset is panic-proof ---
+
+    #[test]
+    fn compress_single_file_crlf_over_cap_no_panic() {
+        // CRLF lines + a multi-byte char; over the cap so the byte-offset slice runs.
+        // `line.len() + 1` would undercount the '\r' and could slice mid-char -> panic.
+        let mut stdout = String::new();
+        for i in 1..=(MAX_MATCHES + 5) {
+            stdout.push_str(&format!("{}:café ☕ line\r\n", i));
+        }
+        let hints = FormatHints {
+            line_numbers: true,
+            multi_file: false,
+            single_file_known: true,
+        };
+        // must not panic and must report the overflow
+        let result = compress_with_hints(&stdout, &hints).unwrap();
+        assert!(
+            result.contains("... and 5 more matches"),
+            "expected overflow footer in result"
+        );
     }
 }

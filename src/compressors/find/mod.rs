@@ -133,10 +133,21 @@ fn insert_path(root: &mut TreeNode, path: &str) {
         (path, false)
     };
 
-    let components: Vec<&str> = path_clean.split('/').filter(|s| !s.is_empty()).collect();
+    let mut components: Vec<String> = path_clean
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
 
     if components.is_empty() {
         return;
+    }
+
+    // preserve absolute-path semantics: re-prepend '/' onto first segment
+    if path_clean.starts_with('/')
+        && let Some(first) = components.first_mut()
+    {
+        *first = format!("/{}", first);
     }
 
     let mut current = root;
@@ -188,8 +199,19 @@ fn render_tree(node: &TreeNode, depth: usize) -> String {
     lines.join("\n")
 }
 
-/// Returns true if the args contain `-type d` (directories only).
+/// Returns true only when `-type d` is an unconditional top-level predicate, so every listed
+/// entry is guaranteed a directory. Conservatively declines when the expression contains
+/// negation (`!`/`-not`) or alternation (`-o`/`-or`), since `-type d` may then apply to a
+/// non-directory subset (e.g. `! -type d` lists non-directories, `-type f -o -type d` mixes both).
 fn is_dirs_only(args: &[String]) -> bool {
+    // decline: negation/alternation make `-type d` conditional, not guaranteed dirs-only
+    if args
+        .iter()
+        .any(|a| a == "!" || a == "-not" || a == "-o" || a == "-or")
+    {
+        return false;
+    }
+
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         if arg == "-type" && iter.next().is_some_and(|v| v == "d") {
@@ -505,6 +527,59 @@ mod tests {
         let input = "foo.txt\n";
         let result = compress(input);
         assert_eq!(result, Some("foo.txt".to_string()));
+    }
+
+    // Absolute paths keep their leading slash in the rendered tree.
+    #[test]
+    fn test_compress_absolute_path_keeps_leading_slash() {
+        let input = "/usr/bin/find\n/usr/bin/grep\n";
+        let result = compress(input);
+        assert_eq!(
+            result,
+            Some("/usr/\n  bin/\n    find\n    grep".to_string())
+        );
+    }
+
+    #[test]
+    fn test_compress_absolute_single_file_keeps_leading_slash() {
+        let input = "/etc/hosts\n";
+        let result = compress(input);
+        assert_eq!(result, Some("/etc/\n  hosts".to_string()));
+    }
+
+    // --- is_dirs_only ---
+
+    #[test]
+    fn test_is_dirs_only_plain_type_d() {
+        let args: Vec<String> = vec![".".into(), "-type".into(), "d".into()];
+        assert!(is_dirs_only(&args));
+    }
+
+    #[test]
+    fn test_is_dirs_only_declines_negation_bang() {
+        // `! -type d` lists non-directories
+        let args: Vec<String> = vec![".".into(), "!".into(), "-type".into(), "d".into()];
+        assert!(!is_dirs_only(&args));
+    }
+
+    #[test]
+    fn test_is_dirs_only_declines_not() {
+        let args: Vec<String> = vec![".".into(), "-not".into(), "-type".into(), "d".into()];
+        assert!(!is_dirs_only(&args));
+    }
+
+    #[test]
+    fn test_is_dirs_only_declines_alternation() {
+        // `-type f -o -type d` mixes files and dirs
+        let args: Vec<String> = vec![
+            ".".into(),
+            "-type".into(),
+            "f".into(),
+            "-o".into(),
+            "-type".into(),
+            "d".into(),
+        ];
+        assert!(!is_dirs_only(&args));
     }
 
     // Verify that -type d output renders all entries as directories.

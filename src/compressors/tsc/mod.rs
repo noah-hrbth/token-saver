@@ -96,6 +96,7 @@ pub(crate) fn has_skip_flag(args: &[String]) -> bool {
             || a == "-w"
             || a == "--build"
             || a == "-b"
+            || a == "--explainFiles"
             || a == "--listFiles"
             || a == "--listFilesOnly"
             || a == "--listEmittedFiles"
@@ -194,17 +195,39 @@ pub(crate) fn compress_tsc_with_cwd(
 
     let diagnostics = parse_tsc_output(stdout);
 
-    // If no diagnostics parsed and stdout was non-empty and exit != 0, fall back
-    if diagnostics.is_empty() && !stdout.trim().is_empty() && exit_code != 0 {
+    // No diagnostics but stdout carries non-footer content (e.g. --explainFiles
+    // listings): pass through so informational output is never swallowed,
+    // regardless of exit code
+    if diagnostics.is_empty() && stdout_has_meaningful_content(stdout) {
         return None;
     }
 
-    // Clean run (exit 0 or empty diagnostics from exit 1/2 — shouldn't happen but be safe)
+    // Clean run: exit 0 (or 1/2 with empty/footer-only stdout) — emit nothing
     if diagnostics.is_empty() {
         return Some(String::new());
     }
 
     render_output(&diagnostics, &cwd)
+}
+
+/// True if stdout has any line that is neither blank nor a "Found N errors"
+/// footer. Used to keep informational output (e.g. --explainFiles) from being
+/// compressed to an empty string.
+fn stdout_has_meaningful_content(stdout: &str) -> bool {
+    stdout.lines().any(|raw| {
+        let line = raw.trim_end_matches('\r').trim();
+        !line.is_empty() && !is_found_errors_footer(line)
+    })
+}
+
+/// True if `line` is a tsc "Found N error(s)" summary footer. Requires a digit
+/// right after "Found " so a real diagnostic whose path begins with "Found " (e.g.
+/// `Found Tests/a.ts(1,2): error TS2322: ...`) is not mistaken for the footer.
+fn is_found_errors_footer(line: &str) -> bool {
+    line.strip_prefix("Found ")
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
+        && line.contains("error")
 }
 
 /// Parse tsc stdout into a list of diagnostics.
@@ -232,97 +255,91 @@ fn parse_tsc_output(stdout: &str) -> Vec<TscDiagnostic> {
 
 /// Try to parse a line as a tsc diagnostic header.
 /// Returns None if the line is not a diagnostic (or is the "Found N errors" footer).
+///
+/// Anchors on the diagnostic structure (`error TS<code>:` / `warning TS<code>:`
+/// following an optional `path(line,col):` prefix), NOT on the first
+/// `TS<digits>:` anywhere in the line — so a path segment containing such text
+/// cannot hijack parsing.
 fn try_parse_diagnostic(line: &str) -> Option<TscDiagnostic> {
-    // Must contain TS followed by digits followed by :
-    let ts_pos = find_ts_code(line)?;
-
-    // Extract error code and message starting from ts_pos
-    // Format: TS<digits>: <message>
-    let after_ts = &line[ts_pos + 2..]; // skip "TS"
-    let colon_pos = after_ts.find(':')?;
-    let code_str = &after_ts[..colon_pos];
-    if !code_str.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let code: u32 = code_str.parse().ok()?;
-    let message = after_ts[colon_pos + 1..].trim().to_string();
-
-    // Discard "Found N errors" footer lines
-    if message.starts_with("Found ") && message.contains("error") {
+    // Discard "Found N errors" footer lines before structural parsing
+    if is_found_errors_footer(line) {
         return None;
     }
 
-    // Now determine if there's a file location: search for last valid (N,N): pattern
-    let location = find_last_location(line, ts_pos);
-
-    match location {
-        Some((path_str, ln, col)) => Some(TscDiagnostic {
-            path: path_str,
+    // Case 1: file diagnostic with leading `path(line,col): severity TS<code>:`
+    if let Some((path, ln, col, after_loc)) = parse_location_prefix(line)
+        && let Some((code, message)) = parse_severity_code(after_loc)
+    {
+        return Some(TscDiagnostic {
+            path,
             line: ln,
             col,
             code,
             message,
             continuations: Vec::new(),
-        }),
-        None => Some(TscDiagnostic {
-            path: String::new(),
-            line: 0,
-            col: 0,
-            code,
-            message,
-            continuations: Vec::new(),
-        }),
+        });
     }
+
+    // Case 2: global/config diagnostic — line starts with `severity TS<code>:`
+    let (code, message) = parse_severity_code(line)?;
+    Some(TscDiagnostic {
+        path: String::new(),
+        line: 0,
+        col: 0,
+        code,
+        message,
+        continuations: Vec::new(),
+    })
 }
 
-/// Find the position of "TS" in the line that is followed by digits and then ":".
-/// Returns the byte position of the "T" in "TS...".
-fn find_ts_code(line: &str) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i + 2 < bytes.len() {
-        if bytes[i] == b'T' && bytes[i + 1] == b'S' {
-            // Check that next chars are digits followed by ':'
-            let rest = &line[i + 2..];
-            let digits_end = rest
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len());
-            if digits_end > 0 {
-                let after_digits = &rest[digits_end..];
-                if after_digits.starts_with(':') {
-                    return Some(i);
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Find the last valid `(line,col):` pattern before `ts_pos` in the line.
-/// Returns `(path, line, col)` or None if no valid location found.
-fn find_last_location(line: &str, ts_pos: usize) -> Option<(String, u32, u32)> {
-    let search_region = &line[..ts_pos];
-    let mut last_valid: Option<(usize, u32, u32)> = None;
+/// Parse a leading `path(line,col):` location prefix.
+/// Returns `(path, line, col, rest_after_colon)` where `rest` is the slice
+/// immediately after the location's closing `:`. Uses the last valid
+/// `(line,col):` pattern so paths containing `(...)` are handled.
+fn parse_location_prefix(line: &str) -> Option<(String, u32, u32, &str)> {
+    let mut last_valid: Option<(usize, usize, u32, u32)> = None; // (paren_pos, end_pos, ln, col)
 
     let mut i = 0;
-    while let Some(rel_pos) = search_region[i..].find('(') {
+    while let Some(rel_pos) = line[i..].find('(') {
         let paren_pos = i + rel_pos;
-        let rest = &search_region[paren_pos + 1..];
-        if let Some(result) = try_parse_location(rest) {
-            last_valid = Some((paren_pos, result.0, result.1));
+        let rest = &line[paren_pos + 1..];
+        if let Some((ln, col, consumed)) = try_parse_location(rest) {
+            // consumed counts chars after '(' up to and including the ':'
+            let end_pos = paren_pos + 1 + consumed;
+            last_valid = Some((paren_pos, end_pos, ln, col));
         }
         i = paren_pos + 1;
     }
 
-    let (paren_pos, ln, col) = last_valid?;
-    let path = search_region[..paren_pos].trim_end().to_string();
-    Some((path, ln, col))
+    let (paren_pos, end_pos, ln, col) = last_valid?;
+    let path = line[..paren_pos].trim_end().to_string();
+    Some((path, ln, col, &line[end_pos..]))
+}
+
+/// Parse a `severity TS<code>: message` token at the start of `s` (leading
+/// whitespace allowed). Severity must be `error` or `warning`.
+/// Returns `(code, message)` or None.
+fn parse_severity_code(s: &str) -> Option<(u32, String)> {
+    let s = s.trim_start();
+    let after_sev = s
+        .strip_prefix("error ")
+        .or_else(|| s.strip_prefix("warning "))?;
+    let rest = after_sev.trim_start();
+    let after_ts = rest.strip_prefix("TS")?;
+    let colon_pos = after_ts.find(':')?;
+    let code_str = &after_ts[..colon_pos];
+    if code_str.is_empty() || !code_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let code: u32 = code_str.parse().ok()?;
+    let message = after_ts[colon_pos + 1..].trim().to_string();
+    Some((code, message))
 }
 
 /// Try to parse `N,N):` at the start of the given string (the char after `(`).
-/// Returns `(line, col)` or None.
-fn try_parse_location(s: &str) -> Option<(u32, u32)> {
+/// Returns `(line, col, consumed)` where `consumed` is the byte count from the
+/// start of `s` up to and including the trailing `:`. None if not a location.
+fn try_parse_location(s: &str) -> Option<(u32, u32, usize)> {
     // Expect: digits ',' digits ')' ':'
     let comma = s.find(',')?;
     let line_str = &s[..comma];
@@ -344,7 +361,9 @@ fn try_parse_location(s: &str) -> Option<(u32, u32)> {
         return None;
     }
 
-    Some((ln, col))
+    // bytes consumed: digits, ',', digits, ')', ':' — all ASCII
+    let consumed = comma + close + 3;
+    Some((ln, col, consumed))
 }
 
 fn render_output(diagnostics: &[TscDiagnostic], cwd: &Option<String>) -> Option<String> {
@@ -567,6 +586,67 @@ mod tests {
     #[test]
     fn compress_unparseable_nonzero() {
         assert_eq!(compress("some garbage\n", 1), None);
+    }
+
+    #[test]
+    fn can_compress_skips_explain_files() {
+        // --explainFiles emits informational stdout the parser cannot represent
+        assert!(!TscCompressor.can_compress(&args(&["--noEmit", "--explainFiles"])));
+    }
+
+    #[test]
+    fn compress_exit0_informational_stdout_passes_through() {
+        // exit 0, no TS diagnostics, but real stdout — must not vanish to ""
+        let stdout = "lib.es5.d.ts\n  Library referenced via 'es5' from file 'index.ts'\n";
+        assert_eq!(compress(stdout, 0), None);
+    }
+
+    #[test]
+    fn compress_footer_and_blank_lines_stay_empty() {
+        // footer + blank lines only — no meaningful content, stays Some("")
+        assert_eq!(compress("\nFound 0 errors.\n\n", 0), Some(String::new()));
+    }
+
+    #[test]
+    fn diagnostic_anchors_on_severity_not_path() {
+        // path segment contains "TS9999:" — must not hijack the real code/message
+        let diag =
+            try_parse_diagnostic("/project/src/TS9999:weird/a.ts(12,5): error TS2322: Type error.")
+                .unwrap();
+        assert_eq!(diag.code, 2322, "code must come from the diagnostic token");
+        assert_eq!(diag.path, "/project/src/TS9999:weird/a.ts");
+        assert_eq!(diag.line, 12);
+        assert_eq!(diag.col, 5);
+        assert_eq!(diag.message, "Type error.");
+    }
+
+    #[test]
+    fn found_prefixed_path_is_not_footer() {
+        // a real diagnostic whose path starts with "Found " must not be dropped as
+        // the "Found N errors" footer (the footer requires a digit after "Found ")
+        let diag =
+            try_parse_diagnostic("Found Tests/a.ts(1,2): error TS2322: Type error.").unwrap();
+        assert_eq!(diag.code, 2322);
+        assert_eq!(diag.path, "Found Tests/a.ts");
+        // genuine footer still detected
+        assert!(is_found_errors_footer("Found 3 errors in 2 files."));
+        assert!(!is_found_errors_footer(
+            "Found Tests/a.ts(1,2): error TS2322: x"
+        ));
+    }
+
+    #[test]
+    fn parse_severity_code_requires_severity() {
+        // bare "TS1234:" without error/warning severity is not a diagnostic
+        assert!(parse_severity_code("TS1234: nope").is_none());
+        assert_eq!(
+            parse_severity_code("error TS2322: msg"),
+            Some((2322, "msg".to_string()))
+        );
+        assert_eq!(
+            parse_severity_code("warning TS6133: unused"),
+            Some((6133, "unused".to_string()))
+        );
     }
 
     #[test]

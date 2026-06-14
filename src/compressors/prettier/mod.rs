@@ -88,6 +88,11 @@ impl Compressor for PrettierCompressor {
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
         compress_prettier(stdout, stderr, exit_code, &self.mode)
     }
+
+    fn side_effects(&self) -> bool {
+        // --write rewrites files; --check is read-only
+        matches!(self.mode, PrettierMode::Write)
+    }
 }
 
 pub(crate) fn compress_prettier(
@@ -166,7 +171,10 @@ fn compress_check(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> 
         }
 
         if let Some(text) = line.strip_prefix("[warn] ") {
-            if text.starts_with("Code style issues") {
+            // prettier lists unformatted files as "[warn] <path>"; option/config
+            // warnings and the summary are sentences ending in '.'. Keying on the
+            // trailing period (not on whitespace) keeps paths that contain spaces.
+            if text.is_empty() || text.ends_with('.') {
                 continue;
             }
             unformatted.push(text.to_string());
@@ -225,6 +233,27 @@ fn compress_check(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> 
     Some(parts.join("\n\n"))
 }
 
+/// Returns true if `line` is a prettier --write formatted-file line: "<path> <N>ms".
+/// The path may contain spaces, so only the trailing "<number>ms" token is matched.
+/// prettier 3 may append a status, e.g. "<path> <N>ms (unchanged)" / "(cached)" —
+/// these are still files prettier processed, so strip the suffix before matching.
+fn is_formatted_file_line(line: &str) -> bool {
+    let line = line
+        .strip_suffix(" (unchanged)")
+        .or_else(|| line.strip_suffix(" (cached)"))
+        .unwrap_or(line);
+    let Some((path, timing)) = line.rsplit_once(' ') else {
+        return false;
+    };
+    if path.is_empty() {
+        return false;
+    }
+    let Some(num) = timing.strip_suffix("ms") else {
+        return false;
+    };
+    !num.is_empty() && num.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
 fn compress_write(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
     let combined = format!("{}\n{}", stdout, stderr);
 
@@ -235,20 +264,21 @@ fn compress_write(stdout: &str, stderr: &str, exit_code: i32) -> Option<String> 
     let mut formatted_count: usize = 0;
     let mut errors: Vec<(Option<String>, String)> = Vec::new();
 
-    for line in combined.lines() {
-        if line.is_empty() {
-            continue;
+    // formatted-file lines only appear on stdout as "<path> <N>ms"
+    for line in stdout.lines() {
+        if is_formatted_file_line(line) {
+            formatted_count += 1;
         }
+    }
+
+    // errors may surface on either stream
+    for line in combined.lines() {
         if let Some(text) = line.strip_prefix("[error] ") {
             if let Some((path, msg)) = text.split_once(": ") {
                 errors.push((Some(path.to_string()), msg.to_string()));
             } else {
                 errors.push((None, text.to_string()));
             }
-        } else if !line.starts_with('[') {
-            // Prettier --write outputs one line per formatted file: "<path> <timing>"
-            // (e.g. "src/a.ts 47ms"). Count these as formatted files.
-            formatted_count += 1;
         }
     }
 
@@ -688,6 +718,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_check_skips_option_warning() {
+        // option/config warning must not be counted as an unformatted file
+        let stderr = "Checking formatting...\n[warn] Ignored unknown option --foo.\n[warn] src/a.ts\n[warn] Code style issues found in 1 file.";
+        let result = check("", stderr, 1).unwrap();
+        assert!(
+            result.contains("1 file needs formatting"),
+            "should count only the real file; got: {}",
+            result
+        );
+        assert!(
+            !result.contains("Ignored unknown option"),
+            "option warning should not appear; got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_check_keeps_path_with_space() {
+        // an unformatted file whose path contains a space must not be dropped
+        let stderr = "Checking formatting...\n[warn] src/a.ts\n[warn] my dir/b.ts\n[warn] Code style issues found in 2 files. Run Prettier with --write to fix.";
+        let result = check("", stderr, 1).unwrap();
+        assert!(
+            result.contains("2 files need formatting"),
+            "both files must be counted; got: {}",
+            result
+        );
+        assert!(
+            result.contains("b.ts"),
+            "the space-containing path must be listed; got: {}",
+            result
+        );
+    }
+
     // --- compress_write ---
 
     #[test]
@@ -750,6 +814,45 @@ mod tests {
     #[test]
     fn test_write_exit_2() {
         assert_eq!(write_mode("", "", 2), None);
+    }
+
+    #[test]
+    fn test_write_ignores_stderr_noise() {
+        // npm/node warnings on stderr must not inflate the formatted count
+        let stdout = "src/a.ts 47ms\n";
+        let stderr = "npm warn deprecated foo@1.0.0\nDownloading something";
+        let result = write_mode(stdout, stderr, 0).unwrap();
+        assert_eq!(result, "Formatted 1 file");
+    }
+
+    #[test]
+    fn test_write_ignores_non_timing_stdout_lines() {
+        // only "<path> <N>ms" lines count; other stdout lines are ignored
+        let stdout = "src/a.ts 47ms\nUnchanged: src/b.ts\nsome banner line";
+        let result = write_mode(stdout, "", 0).unwrap();
+        assert_eq!(result, "Formatted 1 file");
+    }
+
+    #[test]
+    fn test_write_counts_unchanged_and_cached() {
+        // prettier 3 prints "(unchanged)"/"(cached)" for files it did not rewrite;
+        // these are still processed files and must be counted, not dropped to empty
+        let stdout = "src/a.ts 47ms\nsrc/b.ts 5ms (unchanged)\nsrc/c.ts 3ms (cached)\n";
+        let result = write_mode(stdout, "", 0).unwrap();
+        assert_eq!(result, "Formatted 3 files");
+    }
+
+    #[test]
+    fn test_is_formatted_file_line() {
+        assert!(is_formatted_file_line("src/a.ts 47ms"));
+        assert!(is_formatted_file_line("a.ts 12.5ms"));
+        assert!(is_formatted_file_line("my dir/a.ts 5ms")); // path with space
+        assert!(is_formatted_file_line("src/a.ts 5ms (unchanged)")); // prettier 3
+        assert!(is_formatted_file_line("src/a.ts 3ms (cached)")); // prettier 3
+        assert!(!is_formatted_file_line("src/a.ts"));
+        assert!(!is_formatted_file_line("Downloading something"));
+        assert!(!is_formatted_file_line(" 47ms")); // empty path
+        assert!(!is_formatted_file_line("src/a.ts ms")); // no number
     }
 
     // --- group_by_directory / render_grouped_files ---

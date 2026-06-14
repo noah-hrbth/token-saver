@@ -5,13 +5,34 @@ pub struct LsCompressor;
 impl Compressor for LsCompressor {
     fn can_compress(&self, args: &[String]) -> bool {
         let mut has_l = false;
+        let mut path_operands: usize = 0;
+        let mut after_double_dash = false;
 
         for arg in args {
-            if arg == "--" {
-                break; // end of options — rest are paths
+            if after_double_dash {
+                path_operands += 1;
+                continue;
             }
-            // long option (--foo) or a path: never a short-flag bundle
-            if arg.starts_with("--") || !arg.starts_with('-') {
+            if arg == "--" {
+                after_double_dash = true; // rest are paths
+                continue;
+            }
+            // long option (--foo): not a short-flag bundle, but GNU long forms of
+            // the lossy short flags must still decline (their behavior is dropped)
+            if arg.starts_with("--") {
+                // R recursive, r reverse, any --sort (covers t/S/time/size), d directory-entry
+                if arg == "--recursive"
+                    || arg == "--reverse"
+                    || arg == "--sort"
+                    || arg.starts_with("--sort=")
+                    || arg == "--directory"
+                {
+                    return false;
+                }
+                continue;
+            }
+            if !arg.starts_with('-') {
+                path_operands += 1;
                 continue;
             }
             // single-dash bundle: inspect its letters
@@ -29,6 +50,12 @@ impl Compressor for LsCompressor {
             if flags.contains('l') {
                 has_l = true;
             }
+        }
+
+        // multiple operands -> ls emits "dir:" section headers we can't faithfully
+        // group; decline so the real, grouped output survives
+        if path_operands > 1 {
+            return false;
         }
 
         has_l
@@ -82,9 +109,21 @@ enum EntryType {
     Regular,
 }
 
+enum Size {
+    Bytes(u64),
+    // device number kept verbatim: "8, 0" (Linux) or "0x3000002" (macOS)
+    Device(String),
+}
+
+/// True if `s` is a BSD/macOS hex device number, e.g. "0x3000002".
+fn is_hex_device_number(s: &str) -> bool {
+    s.strip_prefix("0x")
+        .is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 struct LsEntry {
     entry_type: EntryType,
-    size: u64,
+    size: Size,
     name: String,
 }
 
@@ -99,12 +138,25 @@ fn parse_ls_line(line: &str) -> Option<LsEntry> {
 
     let perms = parts[0];
     let type_char = perms.as_bytes().first()?;
-    let size: u64 = parts[4].parse().ok()?;
 
-    // Everything from field 8 onward is the name (may contain consecutive spaces
-    // or ` -> target`). Slice from the byte offset of field 8 in the original
-    // line so internal spacing survives, rather than collapsing via join.
-    let name = line[nth_field_offset(line, 8)?..].to_string();
+    // device files show a device number instead of a byte size: GNU/Linux uses a
+    // "major, minor" pair (e.g. "8, 0") that spans two fields and shifts the name
+    // one field right; BSD/macOS uses a single hex token (e.g. "0x3000002").
+    let (size, name_field) = if parts[4].ends_with(',') {
+        let minor = parts.get(5)?;
+        (Size::Device(format!("{} {}", parts[4], minor)), 9)
+    } else if let Ok(bytes) = parts[4].parse::<u64>() {
+        (Size::Bytes(bytes), 8)
+    } else if is_hex_device_number(parts[4]) {
+        (Size::Device(parts[4].to_string()), 8)
+    } else {
+        return None;
+    };
+
+    // Everything from the name field onward is the name (may contain consecutive
+    // spaces or ` -> target`). Slice from the byte offset of that field in the
+    // original line so internal spacing survives, rather than collapsing via join.
+    let name = line[nth_field_offset(line, name_field)?..].to_string();
 
     // Skip . and ..
     if name == "." || name == ".." {
@@ -154,8 +206,17 @@ fn format_entry(entry: &LsEntry) -> String {
     match entry.entry_type {
         EntryType::Directory => format!("{}/", entry.name),
         EntryType::Symlink => entry.name.clone(), // already contains ` -> target`
-        EntryType::Executable => format!("{}* ({})", entry.name, format_size(entry.size)),
-        EntryType::Regular => format!("{} ({})", entry.name, format_size(entry.size)),
+        EntryType::Executable => format!("{}* ({})", entry.name, format_size_field(&entry.size)),
+        EntryType::Regular => format!("{} ({})", entry.name, format_size_field(&entry.size)),
+    }
+}
+
+/// Render a size field: byte sizes get human-readable units; device files keep
+/// their verbatim "major, minor" text.
+fn format_size_field(size: &Size) -> String {
+    match size {
+        Size::Bytes(bytes) => format_size(*bytes),
+        Size::Device(text) => text.clone(),
     }
 }
 
@@ -460,5 +521,59 @@ drwxr-xr-x  4 noah  staff  128 Mar 30 10:00 .
             "two-space filename must be preserved; got: {}",
             result
         );
+    }
+
+    // ls:14 — GNU long forms of lossy short flags must decline (their behavior is dropped otherwise).
+    #[test]
+    fn long_form_lossy_flags_decline() {
+        let c = LsCompressor;
+        assert!(!c.can_compress(&["-l".into(), "--recursive".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--reverse".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--sort=time".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--sort=size".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--sort".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--directory".into()]));
+        // benign long options still compress
+        assert!(c.can_compress(&["-l".into(), "--color".into()]));
+    }
+
+    // ls:69 — multiple directory operands produce "dir:" section headers we can't group -> decline.
+    #[test]
+    fn multiple_path_operands_decline() {
+        let c = LsCompressor;
+        assert!(!c.can_compress(&["-la".into(), "src".into(), "tests".into()]));
+        assert!(!c.can_compress(&["-l".into(), "--".into(), "src".into(), "tests".into()]));
+        // single operand still compresses
+        assert!(c.can_compress(&["-la".into(), "src".into()]));
+    }
+
+    // ls:102 — device files show "major, minor" in the size column and must not be dropped.
+    #[test]
+    fn device_file_size_preserved() {
+        let input = "\
+total 0
+drwxr-xr-x  4 noah  staff  128 Mar 30 10:00 .
+crw-rw-rw-  1 root  wheel  3,   2 Jun 12 10:00 null\n";
+        let result = compress(input).unwrap();
+        assert_eq!(result, "null (3, 2)".to_string());
+    }
+
+    // ls:102 (macOS) — BSD device files show a single hex device number, not "major, minor".
+    #[test]
+    fn device_file_hex_size_preserved() {
+        let input = "\
+total 0
+crw-rw-rw-  1 root  wheel  0x3000002 Jun 14 18:32 null
+brw-r-----  1 root  operator  0x1000000 Jun  7 12:12 disk0\n";
+        let result = compress(input).unwrap();
+        assert_eq!(result, "null (0x3000002)\ndisk0 (0x1000000)".to_string());
+    }
+
+    #[test]
+    fn is_hex_device_number_detects_form() {
+        assert!(is_hex_device_number("0x3000002"));
+        assert!(!is_hex_device_number("0x")); // empty body
+        assert!(!is_hex_device_number("128")); // decimal size
+        assert!(!is_hex_device_number("0xZZ")); // non-hex
     }
 }

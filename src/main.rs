@@ -5,12 +5,20 @@ mod shell_hook;
 mod uninstall;
 
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process;
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let argv0 = &args[0];
+    // args_os, not args(): env::args() panics on a non-UTF-8 argument (e.g. a
+    // filename with invalid bytes), which would crash the proxy before it could
+    // even pass the command through. argv is kept as OsString so exact bytes
+    // survive to the passthrough exec.
+    let args: Vec<OsString> = env::args_os().collect();
+    let argv0 = match args.first() {
+        Some(a) => a,
+        None => process::exit(1),
+    };
 
     // Determine command name and command args.
     // If invoked as a symlink (argv[0] = "git"), command = "git", command_args = rest.
@@ -21,8 +29,8 @@ fn main() {
         .to_string_lossy()
         .to_string();
 
-    let (command, command_args) = if binary_name == "token-saver" {
-        match args.get(1).map(String::as_str) {
+    let (command, command_args): (String, Vec<OsString>) = if binary_name == "token-saver" {
+        match args.get(1).and_then(|a| a.to_str()) {
             Some("version") => {
                 println!("token-saver {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -53,11 +61,11 @@ fn main() {
                 return;
             }
             Some("install") | Some("init") => {
-                let install_args: Vec<String> = args.iter().skip(2).cloned().collect();
+                let install_args: Vec<String> = args.iter().skip(2).map(arg_to_string).collect();
                 process::exit(install::run(&install_args));
             }
             Some("uninstall") => {
-                let uninstall_args: Vec<String> = args.iter().skip(2).cloned().collect();
+                let uninstall_args: Vec<String> = args.iter().skip(2).map(arg_to_string).collect();
                 process::exit(uninstall::run(&uninstall_args));
             }
             _ => {}
@@ -67,7 +75,7 @@ fn main() {
             eprintln!("Usage: token-saver <command> [args...]");
             process::exit(1);
         }
-        (args[1].clone(), args[2..].to_vec())
+        (arg_to_string(&args[1]), args[2..].to_vec())
     } else {
         // Symlink invocation: argv[0] is the command name
         (binary_name, args[1..].to_vec())
@@ -99,25 +107,34 @@ fn main() {
         unreachable!();
     }
 
-    // Try to find a compressor
-    let compressor = compressors::find_compressor(&command, &command_args);
+    // Compressors operate on &str args; if any arg is not valid UTF-8 we cannot
+    // compress and must pass the exact bytes through unchanged.
+    let command_args_utf8: Option<Vec<String>> = command_args
+        .iter()
+        .map(|a| a.to_str().map(str::to_string))
+        .collect();
+
+    let compressor = command_args_utf8
+        .as_ref()
+        .and_then(|utf8| compressors::find_compressor(&command, utf8));
 
     match compressor {
         None => {
-            // No compressor — passthrough
+            // No compressor (or non-UTF-8 args) — passthrough
             if let Err(e) = runner::exec_passthrough(&real_binary, &command_args) {
                 eprintln!("token-saver: failed to exec {}: {}", command, e);
                 process::exit(1);
             }
         }
         Some(comp) => {
-            // Run with normalized args, try to compress
-            let normalized = comp.normalized_args(&command_args);
+            // a compressor is only returned when command_args_utf8 is Some
+            let utf8_args = command_args_utf8.expect("compressor implies utf8 args");
+            let normalized = comp.normalized_args(&utf8_args);
             match runner::execute_captured(&real_binary, &normalized) {
                 Ok(output) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let exit_code = output.status.code().unwrap_or(1);
+                    let exit_code = exit_code_of(&output.status);
 
                     match comp.compress(&stdout, &stderr, exit_code) {
                         Some(compressed) => {
@@ -125,7 +142,16 @@ fn main() {
                             process::exit(exit_code);
                         }
                         None => {
-                            // Compression failed — fall back to running with original args
+                            // Compression declined. Re-running with the user's original
+                            // args gives faithful output, but a side-effecting command
+                            // (prettier --write, jest) already ran once via the capture —
+                            // re-execing would double the effect/cost, so emit the
+                            // captured output instead.
+                            if comp.side_effects() {
+                                print!("{}", stdout);
+                                eprint!("{}", stderr);
+                                process::exit(exit_code);
+                            }
                             if let Err(e) = runner::exec_passthrough(&real_binary, &command_args) {
                                 eprintln!("token-saver: failed to exec {}: {}", command, e);
                                 process::exit(1);
@@ -143,4 +169,20 @@ fn main() {
             }
         }
     }
+}
+
+/// Convert an argv element to a String, replacing any non-UTF-8 bytes. Used only
+/// for token-saver's own subcommands (install/uninstall), whose args are ASCII.
+fn arg_to_string(arg: &OsString) -> String {
+    arg.to_string_lossy().into_owned()
+}
+
+/// Exit code of a finished child, mapping signal-termination to the shell's
+/// 128+signal convention rather than collapsing it to 1 (which a compressor
+/// could misread as a clean result).
+fn exit_code_of(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .unwrap_or_else(|| status.signal().map(|s| 128 + s).unwrap_or(1))
 }

@@ -2,10 +2,43 @@ use super::commit_parser::{self, CommitFields};
 use super::diff_parser;
 use crate::compressors::Compressor;
 
-pub struct GitLogCompressor;
+#[derive(Default)]
+pub struct GitLogCompressor {
+    /// True when the user passed an explicit commit count (-n/-N/--max-count).
+    /// We then neither inject our own cap nor claim truncation, so the exact set
+    /// the user asked for is returned (no off-by-one drop at count == cap+1).
+    pub user_limit: bool,
+}
+
+/// True when the user passed an explicit commit-count flag (`-n N`, `-nN`,
+/// `--max-count[=N]`, or `-<digits>`). Used to avoid injecting our own cap and to
+/// suppress the truncation notice — we only claim "more" for caps WE added.
+pub(crate) fn user_specified_count(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| {
+        a == "-n"
+            || a.starts_with("-n")
+            || a.starts_with("--max-count")
+            || (a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()))
+    })
+}
 
 /// Flags that cause passthrough — agent chose a specific output format or display mode.
-const SKIP_FLAGS: &[&str] = &["--oneline", "--graph", "--color", "--color=always"];
+/// The output-shape flags (`--name-only` etc.) emit per-commit data we cannot place in
+/// our format slots, so they must pass through rather than be parsed as body text.
+const SKIP_FLAGS: &[&str] = &[
+    "--oneline",
+    "--graph",
+    "--color",
+    "--color=always",
+    "--name-only",
+    "--name-status",
+    "--numstat",
+    "--shortstat",
+    "--raw",
+];
+
+/// Default cap on commits shown. We request one extra to detect genuine truncation.
+const DEFAULT_LIMIT: usize = 20;
 
 /// Known git --pretty presets that we can compress (verbose formats we improve upon).
 const COMPRESS_PRESETS: &[&str] = &["short", "medium", "full", "fuller"];
@@ -62,12 +95,7 @@ impl Compressor for GitLogCompressor {
         let has_patch = tail
             .iter()
             .any(|a| a == "-p" || a == "--patch" || a == "-u");
-        let has_count = tail.iter().any(|a| {
-            a == "-n"
-                || a.starts_with("-n")
-                || a.starts_with("--max-count")
-                || (a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()))
-        });
+        let has_count = user_specified_count(original_args);
 
         let mut result = vec![
             "log".to_string(),
@@ -82,9 +110,10 @@ impl Compressor for GitLogCompressor {
             result.push("--diff-algorithm=histogram".to_string());
         }
 
+        // request one extra so compress can detect genuine truncation vs exactly-at-cap
         if !has_count {
             result.push("-n".to_string());
-            result.push("20".to_string());
+            result.push((DEFAULT_LIMIT + 1).to_string());
         }
 
         for arg in tail {
@@ -112,7 +141,7 @@ impl Compressor for GitLogCompressor {
             return Some("(empty)\n".to_string());
         }
 
-        let has_patch = stdout.contains("\ndiff --git ");
+        let has_patch = output_has_patch(stdout);
         let has_stat = stdout.contains(" | ")
             && (stdout.contains("file changed") || stdout.contains("files changed"));
 
@@ -122,14 +151,61 @@ impl Compressor for GitLogCompressor {
             return Some("(empty)\n".to_string());
         }
 
-        let mut output = format_log(&entries);
+        // truncation: normalized_args requests exactly DEFAULT_LIMIT+1, so seeing the
+        // sentinel count proves more commits exist beyond our injected cap. A user-supplied
+        // -n returns a different count and is left untouched (never over-claim or drop).
+        let truncated = !self.user_limit && entries.len() == DEFAULT_LIMIT + 1;
+        let shown = if truncated {
+            &entries[..DEFAULT_LIMIT]
+        } else {
+            &entries[..]
+        };
 
-        if entries.len() == 20 {
-            output.push_str("(showing 20 commits, use -n to see more)\n");
+        let mut output = format_log(shown);
+
+        if truncated {
+            output.push_str(&format!(
+                "(showing {} commits, use -n to see more)\n",
+                DEFAULT_LIMIT
+            ));
         }
 
         Some(output)
     }
+}
+
+/// Detect whether the output contains a real patch section.
+///
+/// We cannot see args from `compress`, so we sniff structurally: a genuine diff
+/// begins with `diff --git ` followed by a canonical diff-header line (`index `,
+/// `--- `, mode/rename markers, `Binary files `). A commit body that merely mentions
+/// "diff --git " is not followed by those, so it is NOT treated as a patch.
+fn output_has_patch(stdout: &str) -> bool {
+    let lines: Vec<&str> = stdout.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.starts_with("diff --git ") {
+            continue;
+        }
+        // next non-blank line must look like a diff header
+        if let Some(next) = lines[i + 1..].iter().find(|l| !l.trim().is_empty())
+            && is_diff_header_line(next)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Canonical lines that immediately follow a real `diff --git ` line.
+fn is_diff_header_line(line: &str) -> bool {
+    line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("Binary files ")
 }
 
 // ---------------------------------------------------------------------------
@@ -170,11 +246,29 @@ fn parse_log(raw: &str, has_patch: bool, has_stat: bool) -> Option<Vec<LogEntry>
     Some(entries)
 }
 
+/// Find the byte offset of the `\n` preceding the first genuine `diff --git ` header
+/// inside a chunk, so `chunk[idx + 1..]` begins at the diff. A body line mentioning
+/// "diff --git " is skipped because it is not followed by a diff-header line.
+fn find_diff_start(chunk: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(rel) = chunk[search_from..].find("\ndiff --git ") {
+        let nl_idx = search_from + rel;
+        let after = &chunk[nl_idx + 1..];
+        // next non-blank line after the "diff --git" line must be a diff header
+        let next_line = after.lines().nth(1);
+        if next_line.map(is_diff_header_line).unwrap_or(false) {
+            return Some(nl_idx);
+        }
+        search_from = nl_idx + 1;
+    }
+    None
+}
+
 /// Parse a single commit chunk (everything after the leading \x01).
 fn parse_log_entry(chunk: &str, has_patch: bool, has_stat: bool) -> Option<LogEntry> {
-    // Split off diff section (starts at "\ndiff --git ")
+    // Split off diff section at the first genuine "diff --git " header
     let (meta_and_stat, diff) = if has_patch {
-        match chunk.find("\ndiff --git ") {
+        match find_diff_start(chunk) {
             Some(idx) => {
                 let diff_text = &chunk[idx + 1..]; // keep the leading \n stripped
                 let parsed = diff_parser::parse_diff(diff_text);
@@ -210,60 +304,64 @@ fn parse_log_entry(chunk: &str, has_patch: bool, has_stat: bool) -> Option<LogEn
     })
 }
 
-/// Split stat lines from the end of the format+stat region.
+/// Split a `--stat` block from the end of the format+stat region.
 ///
-/// The stat block appears after the format fields (after the last \x00 / body field).
-/// It starts with lines containing ` | ` and ends with a summary line.
+/// A git stat block is a CONTIGUOUS TRAILING block: zero or more
+/// `<path> | <count> <bar>` lines followed by exactly one summary line
+/// (`N file(s) changed, ...`). We detect it by anchoring on the trailing summary
+/// line, then walking backwards over stat-shaped lines. This keeps body lines that
+/// merely contain ` | ` (e.g. markdown tables) inside the body.
 /// Returns `(format_portion, Some(stat_text))` or `(full_text, None)`.
 fn split_stat(text: &str) -> (&str, Option<&str>) {
-    // The stat section begins after the body field (last \x00-delimited field).
-    // Find the last \x00, then look for stat lines after it.
+    // stat appears after the body field; only inspect content after the last \x00
     let last_nul = match text.rfind('\x00') {
         Some(idx) => idx,
         None => return (text, None),
     };
+    let body_start = last_nul + 1;
+    let after_nul = &text[body_start..];
 
-    let after_nul = &text[last_nul + 1..];
+    let lines: Vec<&str> = after_nul.lines().collect();
 
-    // A stat block has at least one line with " | " followed by a summary.
-    if !after_nul.contains(" | ") {
-        return (text, None);
-    }
-
-    // Find where stat begins: first line containing " | " after the body content
-    let body_and_stat = after_nul;
-    let stat_start_in_after = body_and_stat
-        .lines()
-        .enumerate()
-        .find(|(_, line)| {
-            line.contains(" | ") || line.contains("file changed") || line.contains("files changed")
-        })
-        .map(|(i, _)| i);
-
-    let Some(stat_line_idx) = stat_start_in_after else {
-        return (text, None);
+    // last non-blank line must be a git stat summary, else there is no stat block
+    let summary_idx = match lines.iter().rposition(|l| !l.trim().is_empty()) {
+        Some(idx) if is_stat_summary_line(lines[idx]) => idx,
+        _ => return (text, None),
     };
 
-    let lines: Vec<&str> = body_and_stat.lines().collect();
-    let stat_lines = &lines[stat_line_idx..];
-
-    if stat_lines.is_empty() {
-        return (text, None);
+    // walk backwards over contiguous stat-shaped lines preceding the summary
+    let mut block_start = summary_idx;
+    while block_start > 0 && is_stat_file_line(lines[block_start - 1]) {
+        block_start -= 1;
     }
 
-    // Reconstruct: format_part is everything up to where stat begins in after_nul
-    let stat_text_start = {
-        let mut offset = last_nul + 1;
-        for line in &lines[..stat_line_idx] {
-            offset += line.len() + 1; // +1 for newline
-        }
-        offset
-    };
+    // byte offset where the stat block begins within `text`
+    let mut stat_text_start = body_start;
+    for line in &lines[..block_start] {
+        stat_text_start += line.len() + 1; // +1 for newline
+    }
 
     let format_part = &text[..stat_text_start];
     let stat_part = &text[stat_text_start..];
 
     (format_part, Some(stat_part))
+}
+
+/// A git stat summary line: `N file(s) changed, ...` (leading whitespace allowed).
+fn is_stat_summary_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with(|c: char| c.is_ascii_digit())
+        && (line.contains("file changed") || line.contains("files changed"))
+}
+
+/// A git stat file line: `<path> | <count><bar>` or `<path> | Bin ...`.
+/// The segment after ` | ` must start with a digit or `Bin` (binary marker).
+fn is_stat_file_line(line: &str) -> bool {
+    let Some(pipe_idx) = line.find(" | ") else {
+        return false;
+    };
+    let after = line[pipe_idx + 3..].trim_start();
+    after.starts_with(|c: char| c.is_ascii_digit()) || after.starts_with("Bin")
 }
 
 // ---------------------------------------------------------------------------
@@ -322,142 +420,143 @@ mod tests {
 
     #[test]
     fn can_compress_bare_log() {
-        assert!(GitLogCompressor.can_compress(&args(&["log"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log"])));
     }
 
     #[test]
     fn can_compress_with_n() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "-n", "5"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "-n", "5"])));
     }
 
     #[test]
     fn can_compress_with_author() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "--author=Alice"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "--author=Alice"])));
     }
 
     #[test]
     fn can_compress_with_patch() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "-p"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "-p"])));
     }
 
     #[test]
     fn can_compress_with_stat() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "--stat"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "--stat"])));
     }
 
     #[test]
     fn can_compress_with_since() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "--since=2024-01-01"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "--since=2024-01-01"])));
     }
 
     #[test]
     fn can_compress_pretty_medium() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "--pretty=medium"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "--pretty=medium"])));
     }
 
     #[test]
     fn can_compress_pretty_full() {
-        assert!(GitLogCompressor.can_compress(&args(&["log", "--pretty=full"])));
+        assert!(GitLogCompressor::default().can_compress(&args(&["log", "--pretty=full"])));
     }
 
     #[test]
     fn skip_oneline() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--oneline"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--oneline"])));
     }
 
     #[test]
     fn skip_graph() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--graph"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--graph"])));
     }
 
     #[test]
     fn skip_color() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--color"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--color"])));
     }
 
     #[test]
     fn skip_color_always() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--color=always"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--color=always"])));
     }
 
     #[test]
     fn skip_format_custom() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--format=%H %s"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--format=%H %s"])));
     }
 
     #[test]
     fn skip_pretty_custom() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=%H %an"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=%H %an"])));
     }
 
     #[test]
     fn skip_pretty_oneline() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=oneline"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=oneline"])));
     }
 
     #[test]
     fn skip_pretty_reference() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=reference"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=reference"])));
     }
 
     #[test]
     fn skip_pretty_email() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=email"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=email"])));
     }
 
     #[test]
     fn skip_pretty_raw() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=raw"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=raw"])));
     }
 
     #[test]
     fn skip_pretty_mboxrd() {
-        assert!(!GitLogCompressor.can_compress(&args(&["log", "--pretty=mboxrd"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--pretty=mboxrd"])));
     }
 
     #[test]
     fn non_log_status() {
-        assert!(!GitLogCompressor.can_compress(&args(&["status"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["status"])));
     }
 
     #[test]
     fn non_log_diff() {
-        assert!(!GitLogCompressor.can_compress(&args(&["diff"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["diff"])));
     }
 
     #[test]
     fn non_log_log_tree() {
         // "log-tree" is not "log"
-        assert!(!GitLogCompressor.can_compress(&args(&["log-tree"])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log-tree"])));
     }
 
     #[test]
     fn non_log_empty_args() {
-        assert!(!GitLogCompressor.can_compress(&args(&[])));
+        assert!(!GitLogCompressor::default().can_compress(&args(&[])));
     }
 
     // --- Task 5: normalized_args ---
 
     #[test]
     fn bare_log_contains_required_flags() {
-        let result = GitLogCompressor.normalized_args(&args(&["log"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log"]));
         assert_eq!(result[0], "log");
         assert!(result.iter().any(|a| a.starts_with("--format=")));
         assert!(result.contains(&"--no-color".to_string()));
         assert!(result.contains(&"-n".to_string()));
-        assert!(result.contains(&"20".to_string()));
+        // cap is DEFAULT_LIMIT+1 so compress can detect genuine truncation
+        assert!(result.contains(&(DEFAULT_LIMIT + 1).to_string()));
     }
 
     #[test]
     fn injects_default_cap() {
-        let result = GitLogCompressor.normalized_args(&args(&["log"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log"]));
         let n_idx = result.iter().position(|a| a == "-n").unwrap();
-        assert_eq!(result[n_idx + 1], "20");
+        assert_eq!(result[n_idx + 1], (DEFAULT_LIMIT + 1).to_string());
     }
 
     #[test]
     fn preserves_user_n() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "-n", "5"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "-n", "5"]));
         let n_count = result.iter().filter(|a| a.as_str() == "-n").count();
         assert_eq!(n_count, 1, "Should have exactly one -n");
         let n_idx = result.iter().position(|a| a == "-n").unwrap();
@@ -466,14 +565,14 @@ mod tests {
 
     #[test]
     fn preserves_max_count() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "--max-count=10"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "--max-count=10"]));
         assert!(result.contains(&"--max-count=10".to_string()));
         assert!(!result.contains(&"-n".to_string()));
     }
 
     #[test]
     fn with_patch_adds_diff_flags() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "-p"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "-p"]));
         assert!(result.contains(&"-p".to_string()));
         assert!(result.contains(&"--unified=1".to_string()));
         assert!(result.contains(&"--no-ext-diff".to_string()));
@@ -482,14 +581,14 @@ mod tests {
 
     #[test]
     fn patch_alias_adds_diff_flags() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "--patch"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "--patch"]));
         assert!(result.contains(&"-p".to_string()));
         assert!(result.contains(&"--unified=1".to_string()));
     }
 
     #[test]
     fn preserves_filters() {
-        let result = GitLogCompressor.normalized_args(&args(&[
+        let result = GitLogCompressor::default().normalized_args(&args(&[
             "log",
             "--author=Alice",
             "--since=2024-01-01",
@@ -500,27 +599,30 @@ mod tests {
 
     #[test]
     fn preserves_stat() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "--stat"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "--stat"]));
         assert!(result.contains(&"--stat".to_string()));
     }
 
     #[test]
     fn preserves_range() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "HEAD~5..HEAD"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "HEAD~5..HEAD"]));
         assert!(result.contains(&"HEAD~5..HEAD".to_string()));
     }
 
     #[test]
     fn strips_pretty_preset() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "--pretty=medium"]));
+        let result =
+            GitLogCompressor::default().normalized_args(&args(&["log", "--pretty=medium"]));
         assert!(!result.iter().any(|a| a.starts_with("--pretty=")));
     }
 
     #[test]
     fn numeric_shorthand_count() {
-        let result = GitLogCompressor.normalized_args(&args(&["log", "-5"]));
+        let result = GitLogCompressor::default().normalized_args(&args(&["log", "-5"]));
         assert!(result.contains(&"-5".to_string()));
-        assert!(!result.contains(&"20".to_string()));
+        // user count present → no default cap injected
+        assert!(!result.contains(&"-n".to_string()));
+        assert!(!result.contains(&(DEFAULT_LIMIT + 1).to_string()));
     }
 
     // --- Task 6: parsing ---
@@ -769,7 +871,7 @@ mod tests {
     #[test]
     fn compress_nonzero_exit_returns_none() {
         assert_eq!(
-            GitLogCompressor.compress("anything", "fatal: error", 128),
+            GitLogCompressor::default().compress("anything", "fatal: error", 128),
             None
         );
     }
@@ -777,7 +879,7 @@ mod tests {
     #[test]
     fn compress_empty_output() {
         assert_eq!(
-            GitLogCompressor.compress("", "", 0),
+            GitLogCompressor::default().compress("", "", 0),
             Some("(empty)\n".to_string())
         );
     }
@@ -785,15 +887,13 @@ mod tests {
     #[test]
     fn compress_whitespace_only_output() {
         assert_eq!(
-            GitLogCompressor.compress("  \n\n  ", "", 0),
+            GitLogCompressor::default().compress("  \n\n  ", "", 0),
             Some("(empty)\n".to_string())
         );
     }
 
-    #[test]
-    fn compress_truncation_notice() {
-        // Build exactly 20 commits
-        let chunks: String = (0..20)
+    fn n_commits(n: usize) -> String {
+        (0..n)
             .map(|i| {
                 format!(
                     "\x01{:07x}\x00\x002024-01-{:02}T10:00:00+00:00\x00Author{}\x00Subject {}\x00",
@@ -803,32 +903,194 @@ mod tests {
                     i
                 )
             })
-            .collect();
-        let result = GitLogCompressor.compress(&chunks, "", 0).unwrap();
+            .collect()
+    }
+
+    // --- Task 3: truncation notice only when genuinely truncated ---
+
+    #[test]
+    fn compress_truncation_notice_when_over_limit() {
+        // 21 entries (limit+1) → genuinely more than shown
+        let chunks = n_commits(DEFAULT_LIMIT + 1);
+        let result = GitLogCompressor::default()
+            .compress(&chunks, "", 0)
+            .unwrap();
         assert!(
             result.contains("(showing 20 commits, use -n to see more)"),
             "Expected truncation notice in:\n{}",
             result
         );
+        // only DEFAULT_LIMIT commits rendered, the extra is dropped
+        let shown = result.matches("* ").count();
+        assert_eq!(shown, DEFAULT_LIMIT, "should render exactly 20 commits");
+    }
+
+    #[test]
+    fn compress_no_truncation_notice_at_exactly_limit() {
+        // exactly 20 entries → NOT truncated, must not over-claim
+        let chunks = n_commits(DEFAULT_LIMIT);
+        let result = GitLogCompressor::default()
+            .compress(&chunks, "", 0)
+            .unwrap();
+        assert!(
+            !result.contains("showing 20 commits"),
+            "exactly 20 commits must not trigger truncation notice:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn compress_user_count_above_limit_not_truncated() {
+        // user asked for more (count != sentinel) → render all, never drop or over-claim
+        let chunks = n_commits(25);
+        let result = GitLogCompressor::default()
+            .compress(&chunks, "", 0)
+            .unwrap();
+        assert!(
+            !result.contains("showing 20 commits"),
+            "user-requested 25 commits must not be flagged as truncated:\n{}",
+            result
+        );
+        assert_eq!(
+            result.matches("* ").count(),
+            25,
+            "all 25 commits must render"
+        );
+    }
+
+    #[test]
+    fn compress_user_count_exactly_at_sentinel_not_truncated() {
+        // user asked for exactly DEFAULT_LIMIT+1 (e.g. `git log -n 21`): we inject
+        // no cap, so 21 entries means the user got what they asked for — render all,
+        // never drop the 21st or claim truncation. user_limit must defeat the sentinel.
+        let chunks = n_commits(DEFAULT_LIMIT + 1);
+        let result = GitLogCompressor { user_limit: true }
+            .compress(&chunks, "", 0)
+            .unwrap();
+        assert!(
+            !result.contains("showing 20 commits"),
+            "user-requested 21 commits must not be flagged as truncated:\n{}",
+            result
+        );
+        assert_eq!(
+            result.matches("* ").count(),
+            DEFAULT_LIMIT + 1,
+            "all 21 commits must render"
+        );
+    }
+
+    #[test]
+    fn user_specified_count_detects_forms() {
+        assert!(user_specified_count(&args(&["log", "-n", "21"])));
+        assert!(user_specified_count(&args(&["log", "--max-count=21"])));
+        assert!(user_specified_count(&args(&["log", "-21"])));
+        assert!(!user_specified_count(&args(&["log"])));
+        assert!(!user_specified_count(&args(&["log", "--stat"])));
+        // bare "-" is not a count
+        assert!(!user_specified_count(&args(&["log", "-"])));
     }
 
     #[test]
     fn compress_no_truncation_notice_under_20() {
-        let chunks: String = (0..5)
-            .map(|i| {
-                format!(
-                    "\x01{:07x}\x00\x002024-01-{:02}T10:00:00+00:00\x00Author{}\x00Subject {}\x00",
-                    i,
-                    i + 1,
-                    i,
-                    i
-                )
-            })
-            .collect();
-        let result = GitLogCompressor.compress(&chunks, "", 0).unwrap();
+        let chunks = n_commits(5);
+        let result = GitLogCompressor::default()
+            .compress(&chunks, "", 0)
+            .unwrap();
         assert!(
             !result.contains("showing 20 commits"),
             "Should not have truncation notice for 5 commits"
         );
+    }
+
+    // --- Task 1: output-shape flags decline (passthrough) ---
+
+    #[test]
+    fn skip_name_only() {
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--name-only"])));
+    }
+
+    #[test]
+    fn skip_name_status() {
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--name-status"])));
+    }
+
+    #[test]
+    fn skip_numstat() {
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--numstat"])));
+    }
+
+    #[test]
+    fn skip_shortstat() {
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--shortstat"])));
+    }
+
+    #[test]
+    fn skip_raw() {
+        assert!(!GitLogCompressor::default().can_compress(&args(&["log", "--raw"])));
+    }
+
+    // --- Task 2: has_patch derived from real diff structure, not body content ---
+
+    #[test]
+    fn body_mentioning_diff_git_is_not_patch() {
+        // body contains a literal "diff --git " line but no real diff follows
+        let raw = "\x01a1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00Discussed the diff --git format in review.\nNext line of body.".to_string();
+        assert!(
+            !output_has_patch(&raw),
+            "body mention of 'diff --git' must not be treated as patch"
+        );
+        // body must survive intact, not be truncated/rendered as diff
+        let result = GitLogCompressor::default().compress(&raw, "", 0).unwrap();
+        assert!(result.contains("diff --git format in review"));
+        assert!(result.contains("Next line of body"));
+    }
+
+    #[test]
+    fn real_patch_is_detected() {
+        let raw = "\x01a1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00\ndiff --git a/x.rs b/x.rs\nindex abc..def 100644\n--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string();
+        assert!(
+            output_has_patch(&raw),
+            "a genuine diff followed by 'index ' must be detected as patch"
+        );
+    }
+
+    // --- Task 4: split_stat anchors on trailing summary, not stray " | " ---
+
+    #[test]
+    fn body_with_markdown_table_kept_in_body() {
+        // body has a markdown table (lines with " | ") but NO trailing stat summary
+        let body = "See table:\n| col a | col b |\n| ----- | ----- |\n| 1 | 2 |";
+        let raw = format!(
+            "\x01a1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00{}",
+            body
+        );
+        // no stat summary present → split_stat must return None
+        let (format_part, stat) = split_stat(&raw);
+        assert!(stat.is_none(), "markdown table must not be parsed as stat");
+        assert_eq!(format_part, raw);
+    }
+
+    #[test]
+    fn trailing_stat_block_split_off() {
+        // genuine --stat: file line + summary at the very end
+        let raw = "a1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00 src/a.rs | 3 +++\n 1 file changed, 3 insertions(+)\n".to_string();
+        let (format_part, stat) = split_stat(&raw);
+        let stat = stat.expect("trailing stat block must be detected");
+        assert!(stat.contains("src/a.rs | 3 +++"));
+        assert!(stat.contains("1 file changed"));
+        assert!(!format_part.contains("src/a.rs"));
+    }
+
+    #[test]
+    fn body_table_before_real_stat_not_mangled() {
+        // body has a markdown table, then a genuine stat block trails it
+        let raw = "a1b2c3f\x00\x002024-01-15T10:00:00+00:00\x00Alice\x00Subject\x00See:\n| a | b |\n src/a.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n".to_string();
+        let (format_part, stat) = split_stat(&raw);
+        let stat = stat.expect("trailing stat block must be detected");
+        // table line stays in body, only the contiguous trailing stat is split
+        assert!(format_part.contains("| a | b |"));
+        assert!(stat.contains("src/a.rs | 2 +-"));
+        assert!(stat.contains("1 file changed"));
+        assert!(!stat.contains("| a | b |"));
     }
 }

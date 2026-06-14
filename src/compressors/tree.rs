@@ -68,12 +68,32 @@ pub fn group_by_directory(blocks: Vec<PathBlock>) -> Vec<String> {
         for comp in &components {
             cur = cur.children.entry(comp.clone()).or_default();
         }
-        cur.leaf = Some(pb);
+        match &mut cur.leaf {
+            // duplicate path (grep can re-open a file group): merge bodies so
+            // the earlier block's matches are never dropped
+            Some(existing) => merge_block(existing, &pb),
+            None => cur.leaf = Some(pb),
+        }
     }
 
     let mut out: Vec<String> = Vec::new();
     render_children(&root, 0, &mut out);
     out
+}
+
+/// Merge `incoming` into `existing` (same path): append `incoming`'s body —
+/// every line after its leading path header — so neither block's lines are lost.
+///
+/// Line 1 of every block is the path plus a constant suffix
+/// (`first_line.strip_prefix(path)`), so dropping `incoming`'s first line drops
+/// only the redundant repeated header, keeping the contents truthful.
+fn merge_block(existing: &mut PathBlock, incoming: &PathBlock) {
+    let body: Vec<&str> = incoming.block.lines().skip(1).collect();
+    if body.is_empty() {
+        return;
+    }
+    existing.block.push('\n');
+    existing.block.push_str(&body.join("\n"));
 }
 
 /// True if `node`, after single-child compression, is a directory (has
@@ -304,6 +324,17 @@ parse.ts  TS2322\n      5:9  msg"
     #[test]
     fn empty_input() {
         assert_eq!(group_by_directory(vec![]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn duplicate_path_blocks_merge_bodies() {
+        // grep can re-open a file group (same path twice): merge bodies so the
+        // earlier block's matches survive instead of being overwritten.
+        let out = run(vec![
+            pb("src/a.ts", "src/a.ts\n  1: first"),
+            pb("src/a.ts", "src/a.ts\n  9: second"),
+        ]);
+        assert_eq!(out, "src/a.ts\n  1: first\n  9: second");
     }
 
     #[test]

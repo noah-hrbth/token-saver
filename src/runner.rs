@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -19,26 +20,29 @@ pub fn find_real_binary(command_name: &str, self_exe: &Path) -> Option<PathBuf> 
     let path_var = env::var("PATH").ok()?;
     let self_canonical = self_exe.canonicalize().ok();
 
-    // The on-disk file name token-saver's binary always has. A wrapper symlink
-    // (e.g. `rg` -> token-saver) resolves to a file with this name, so matching
-    // it guards against recursing into ourselves even when current_exe() is
-    // unavailable for an exact-path comparison. Falls back to the crate name
-    // when self_exe has no file name (e.g. an empty default path).
-    let self_name = self_exe
-        .file_name()
-        .map(OsStr::to_os_string)
-        .unwrap_or_else(|| OsString::from(env!("CARGO_PKG_NAME")));
+    // Name-only recursion fallback, used ONLY when current_exe() can't be
+    // canonicalized for an exact-path compare (self_canonical is None). We must
+    // NOT derive it from self_exe's file name: in a legacy symlink install
+    // current_exe() can be a command-named path (file name e.g. `git`), and that
+    // name would skip every real `git` on PATH. When our canonical path is known
+    // the exact-path check is authoritative, so no name fallback is needed; when
+    // it's unknown, the crate name is the only identity we can match.
+    let self_name = if self_canonical.is_none() {
+        Some(OsString::from(env!("CARGO_PKG_NAME")))
+    } else {
+        None
+    };
 
     for dir in env::split_paths(&path_var) {
         let candidate = dir.join(command_name);
-        if !candidate.is_file() {
+        if !is_executable_file(&candidate) {
             continue;
         }
 
         // Skip only if this candidate IS token-saver, to avoid recursing into
         // ourselves; a real tool sharing our directory must still be returned.
         if let Ok(resolved) = candidate.canonicalize()
-            && is_token_saver_binary(&resolved, self_canonical.as_deref(), &self_name)
+            && is_token_saver_binary(&resolved, self_canonical.as_deref(), self_name.as_deref())
         {
             continue;
         }
@@ -48,16 +52,30 @@ pub fn find_real_binary(command_name: &str, self_exe: &Path) -> Option<PathBuf> 
     None
 }
 
+/// True if `candidate` is a regular file the current user can execute. Mirrors
+/// the shell's execvp, which skips non-executable PATH candidates and keeps
+/// searching; without this token-saver could pick a candidate the shell would
+/// never run. Unix-only permission check (project targets darwin/unix).
+fn is_executable_file(candidate: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = fs::metadata(candidate) else {
+        return false;
+    };
+    // any of user/group/other execute bits set
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
 /// True if a symlink-resolved PATH candidate is token-saver's own binary, so
 /// executing it would recurse back into token-saver. Matches by canonical path
-/// when we know our own, and always also by the binary's file name so the guard
-/// still holds when current_exe() couldn't be resolved to a canonical path.
+/// when we know our own. The name fallback (`self_name`) is applied only when
+/// it is `Some` — i.e. current_exe() couldn't be canonicalized — so a legacy
+/// command-named self path never masks a same-named real tool on PATH.
 fn is_token_saver_binary(
     resolved: &Path,
     self_canonical: Option<&Path>,
-    self_name: &OsStr,
+    self_name: Option<&OsStr>,
 ) -> bool {
-    self_canonical == Some(resolved) || resolved.file_name() == Some(self_name)
+    self_canonical == Some(resolved) || (self_name.is_some() && resolved.file_name() == self_name)
 }
 
 /// Execute a command with the given args, capturing stdout and stderr.
@@ -66,8 +84,10 @@ pub fn execute_captured(binary: &PathBuf, args: &[String]) -> std::io::Result<Ou
 }
 
 /// Execute a command by replacing the current process (passthrough mode).
-/// This function does not return on success.
-pub fn exec_passthrough(binary: &PathBuf, args: &[String]) -> std::io::Result<()> {
+/// This function does not return on success. Generic over the arg type so the
+/// caller can pass exact `OsString` argv (preserving non-UTF-8 bytes) as well as
+/// `String`.
+pub fn exec_passthrough<S: AsRef<OsStr>>(binary: &PathBuf, args: &[S]) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     // exec replaces the current process — does not return on success
     let err = Command::new(binary).args(args).exec();
@@ -111,7 +131,7 @@ mod tests {
     #[test]
     fn is_token_saver_binary_matches_exact_path() {
         let p = Path::new("/opt/homebrew/bin/token-saver");
-        assert!(is_token_saver_binary(p, Some(p), OsStr::new("token-saver")));
+        assert!(is_token_saver_binary(p, Some(p), None));
     }
 
     #[test]
@@ -123,7 +143,7 @@ mod tests {
         assert!(is_token_saver_binary(
             resolved,
             None,
-            OsStr::new("token-saver")
+            Some(OsStr::new("token-saver"))
         ));
     }
 
@@ -131,11 +151,18 @@ mod tests {
     fn is_token_saver_binary_allows_unrelated_tool() {
         let resolved = Path::new("/opt/homebrew/bin/rg");
         let me = Path::new("/opt/homebrew/bin/token-saver");
-        assert!(!is_token_saver_binary(
-            resolved,
-            Some(me),
-            OsStr::new("token-saver")
-        ));
+        assert!(!is_token_saver_binary(resolved, Some(me), None));
+    }
+
+    #[test]
+    fn is_token_saver_binary_name_fallback_ignored_when_canonical_known() {
+        // Legacy symlink install: current_exe() resolves to a command-named path
+        // (e.g. `git`). self_canonical is Some, so name fallback must be off and
+        // a real, distinct `git` must NOT be treated as token-saver — otherwise
+        // every `git` on PATH gets skipped and we report command-not-found.
+        let resolved = Path::new("/usr/bin/git");
+        let me = Path::new("/opt/homebrew/Cellar/token-saver/0.4.0/bin/git");
+        assert!(!is_token_saver_binary(resolved, Some(me), None));
     }
 
     #[test]
@@ -145,6 +172,52 @@ mod tests {
             Path::new("/nonexistent/token-saver"),
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_git_when_self_exe_is_command_named() {
+        // Legacy symlink install where current_exe() yields a command-named path
+        // (file name `git`) that no longer exists -> can't be canonicalized, so
+        // self_canonical is None and only the crate-name fallback applies, which
+        // does NOT match "git". The OLD code derived self_name from self_exe's
+        // file name ("git") and skipped every real git -> command-not-found, even
+        // when TOKEN_SAVER is unset (find_real_binary runs before that check).
+        if find_real_binary("git", Path::new("/nonexistent")).is_none() {
+            return; // no git on this machine
+        }
+        let command_named_self = Path::new("/nonexistent/legacy/symlink/git");
+        let found = find_real_binary("git", command_named_self);
+        assert!(
+            found.is_some(),
+            "git must be found even when self_exe is named like the command"
+        );
+    }
+
+    #[test]
+    fn is_executable_file_true_for_echo() {
+        // a real binary on PATH must read as executable
+        let echo = find_real_binary("echo", Path::new("/nonexistent")).unwrap();
+        assert!(is_executable_file(&echo));
+    }
+
+    #[test]
+    fn is_executable_file_false_for_non_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        // Arrange: a regular file with no execute bits
+        let dir = std::env::temp_dir().join("ts_runner_perm_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("not_exec");
+        std::fs::write(&file, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Act + Assert
+        assert!(!is_executable_file(&file));
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn is_executable_file_false_for_directory() {
+        // directories are not runnable PATH candidates
+        assert!(!is_executable_file(Path::new("/")));
     }
 
     #[test]

@@ -138,6 +138,10 @@ impl Compressor for NpxCompressor {
     fn compress(&self, stdout: &str, stderr: &str, exit_code: i32) -> Option<String> {
         self.sub_compressor.compress(stdout, stderr, exit_code)
     }
+
+    fn side_effects(&self) -> bool {
+        self.sub_compressor.side_effects()
+    }
 }
 
 /// Returns a compressor for npx commands if the underlying command is supported.

@@ -70,9 +70,12 @@ fn parse_file_chunk(chunk: &str) -> DiffFile {
     let mut new_mode: Option<String> = None;
     let mut hunk_start_idx = None;
 
-    // First line is "a/path b/path" — extract path from b/ side
+    // First line is "a/path b/path" — extract path from b/ side.
+    // Quoted headers (diff --git "a/..." "b/...") are declined upstream, so the
+    // unquoted ` b/` split is safe here; the explicit "+++ b/" / "rename to"
+    // headers below override this for the unambiguous cases.
     if let Some(first) = lines.first()
-        && let Some(b_part) = first.split(" b/").last()
+        && let Some(b_part) = unquoted_b_path(first)
     {
         path = b_part.to_string();
     }
@@ -95,7 +98,11 @@ fn parse_file_chunk(chunk: &str) -> DiffFile {
                 status = FileStatus::ModeChanged;
             }
         } else if line.starts_with("Binary files ") {
-            status = FileStatus::Binary;
+            // keep New/Deleted (set earlier from the file-mode line) so added/
+            // deleted binaries aren't downgraded to a plain "(binary, changed)"
+            if status == FileStatus::Normal || status == FileStatus::ModeChanged {
+                status = FileStatus::Binary;
+            }
         } else if let Some(p) = line.strip_prefix("+++ b/") {
             path = p.to_string();
         } else if line.starts_with("@@ ") && hunk_start_idx.is_none() {
@@ -116,6 +123,28 @@ fn parse_file_chunk(chunk: &str) -> DiffFile {
         new_mode,
         hunks,
     }
+}
+
+/// Extract the b/ path from a `diff --git a/<p> b/<p>` header line (the chunk
+/// is everything after "diff --git ", so `first` looks like `a/<p> b/<p>`).
+///
+/// For non-renames git emits identical a/ and b/ halves, so we pick the ` b/`
+/// separator whose two halves are equal — this tolerates paths that themselves
+/// contain " b/". Renames (differing halves) and any odd shape fall back to the
+/// last " b/" segment; the explicit "+++ b/" / "rename to" headers correct those.
+fn unquoted_b_path(first: &str) -> Option<&str> {
+    if let Some(rest) = first.strip_prefix("a/") {
+        // try every " b/" as the candidate separator; the true one splits
+        // rest into equal a/ and b/ halves
+        for (sep_idx, _) in rest.match_indices(" b/") {
+            let a_path = &rest[..sep_idx];
+            let b_path = &rest[sep_idx + 3..];
+            if a_path == b_path {
+                return Some(b_path);
+            }
+        }
+    }
+    first.split(" b/").last()
 }
 
 /// Parse hunk headers and content lines.
@@ -354,21 +383,49 @@ pub fn compress_stat(raw: &str) -> String {
             let filename = line[..pipe_idx].trim();
             let after_pipe = line[pipe_idx + 3..].trim();
 
-            // after_pipe looks like "15 +++------" or "3 +++" or "5 -----"
+            // Binary stat line: "Bin <old> -> <new> bytes" — the "->" arrow
+            // contains a '-' that must NOT be counted as a deletion
+            if after_pipe.starts_with("Bin") {
+                output.push_str(&format!("{} | {}\n", filename, after_pipe));
+                continue;
+            }
+
+            // after_pipe looks like "15 ++++------" — the leading integer is the
+            // TRUE total (insertions+deletions); the bar is scaled to terminal
+            // width so its char count is NOT a reliable absolute count
+            let total: usize = after_pipe
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.parse().ok())
+                .unwrap_or(0);
+
             let bar_start = after_pipe.find(['+', '-']);
             let bar = match bar_start {
                 Some(idx) => &after_pipe[idx..],
                 None => {
-                    // No bar (binary or zero changes) — pass through trimmed
+                    // No bar (e.g. "0" or mode-only) — pass through trimmed
                     output.push_str(&format!("{} | {}\n", filename, after_pipe));
                     continue;
                 }
             };
 
-            let insertions = bar.chars().filter(|&c| c == '+').count();
-            let deletions = bar.chars().filter(|&c| c == '-').count();
+            let plus = bar.chars().filter(|&c| c == '+').count();
+            let minus = bar.chars().filter(|&c| c == '-').count();
+
+            // split the true total by the bar's +/- ratio (exact when unscaled,
+            // best-effort proportional when git scaled the bar to width)
+            let (insertions, deletions) = match (plus, minus) {
+                (0, 0) => (0, 0),
+                (_p, 0) => (total, 0), // bar is all '+'
+                (0, _m) => (0, total), // bar is all '-'
+                (p, m) => {
+                    let ins = (total * p).div_ceil(p + m);
+                    (ins, total - ins)
+                }
+            };
 
             let counts = match (insertions, deletions) {
+                (0, 0) => "0".to_string(),
                 (ins, 0) => format!("{}+", ins),
                 (0, del) => format!("{}-", del),
                 (ins, del) => format!("{}+ {}-", ins, del),
@@ -446,6 +503,40 @@ mod tests {
         assert_eq!(files[0].path, "image.png");
         assert_eq!(files[0].status, FileStatus::Binary);
         assert!(files[0].hunks.is_empty());
+    }
+
+    #[test]
+    fn parse_new_binary_file_keeps_new_status() {
+        // "new file mode" then "Binary files" — must stay New, not Binary
+        let raw = "diff --git a/added.png b/added.png\nnew file mode 100644\nindex 0000000..eaf36c1\nBinary files /dev/null and b/added.png differ\n";
+        let files = parse_diff(raw);
+        assert_eq!(files[0].path, "added.png");
+        assert_eq!(files[0].status, FileStatus::New);
+    }
+
+    #[test]
+    fn parse_deleted_binary_file_keeps_deleted_status() {
+        // "deleted file mode" then "Binary files" — must stay Deleted, not Binary
+        let raw = "diff --git a/gone.png b/gone.png\ndeleted file mode 100644\nindex eaf36c1..0000000\nBinary files a/gone.png and /dev/null differ\n";
+        let files = parse_diff(raw);
+        assert_eq!(files[0].path, "gone.png");
+        assert_eq!(files[0].status, FileStatus::Deleted);
+    }
+
+    #[test]
+    fn unquoted_b_path_handles_space_b_slash_in_path() {
+        // symmetric "a/P b/P" where P contains " b/" — midpoint split keeps P whole
+        // (chunk passed to parse_file_chunk has "diff --git " already stripped)
+        let header = "a/dir b/file.txt b/dir b/file.txt";
+        assert_eq!(unquoted_b_path(header), Some("dir b/file.txt"));
+    }
+
+    #[test]
+    fn unquoted_b_path_simple() {
+        assert_eq!(
+            unquoted_b_path("a/src/main.rs b/src/main.rs"),
+            Some("src/main.rs")
+        );
     }
 
     #[test]
@@ -630,6 +721,49 @@ mod tests {
             output.contains("-    do_thing()") && output.contains("+        do_thing()"),
             "both indentation variants must be preserved, got:\n{}",
             output
+        );
+    }
+
+    // --- compress_stat: real-integer counts, not scaled-bar char counts ---
+
+    #[test]
+    fn compress_stat_uses_real_total_not_bar_width() {
+        // git scales the bar to ~80 cols; the leading integer is the TRUE total
+        let input = " big.txt | 650 ++++++++++----------\n 1 file changed, 350 insertions(+), 300 deletions(-)\n";
+        let result = compress_stat(input);
+        // bar here has 10 '+' and 10 '-' -> 50/50 split of 650 = 325 each
+        assert!(
+            result.contains("big.txt | 325+ 325-"),
+            "must split real total (650) by bar ratio, not count bar chars, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn compress_stat_all_insertions_uses_real_total() {
+        let input = " new.rs | 300 +++++++++++++\n 1 file changed, 300 insertions(+)\n";
+        let result = compress_stat(input);
+        assert!(
+            result.contains("new.rs | 300+"),
+            "all-'+' bar must report real total as insertions, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn compress_stat_binary_line_not_counted_as_deletion() {
+        // "Bin 1024 -> 2048 bytes" — the '->' arrow must NOT become a deletion
+        let input = " image.png | Bin 1024 -> 2048 bytes\n 1 file changed, 0 insertions(+), 0 deletions(-)\n";
+        let result = compress_stat(input);
+        assert!(
+            result.contains("image.png | Bin 1024 -> 2048 bytes"),
+            "binary stat line must pass through as Bin, not counted, got:\n{}",
+            result
+        );
+        assert!(
+            !result.contains("image.png | 1-"),
+            "binary line must not be reported as a deletion, got:\n{}",
+            result
         );
     }
 }

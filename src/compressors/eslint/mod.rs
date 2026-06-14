@@ -28,8 +28,11 @@ struct EslintMessage {
     rule_id: Option<String>,
     severity: u8,
     message: String,
-    line: u32,
-    column: u32,
+    // absent on file-level warnings (e.g. ignored-file pattern)
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    column: Option<u32>,
     #[serde(default)]
     fatal: bool,
 }
@@ -40,8 +43,8 @@ struct FileOutput {
 }
 
 struct Problem {
-    line: u32,
-    column: u32,
+    line: Option<u32>,
+    column: Option<u32>,
     severity: &'static str,
     message: String,
     rule_id: String,
@@ -93,6 +96,10 @@ pub(crate) fn has_skip_flag(args: &[String]) -> bool {
             || a == "-f"
             || a.starts_with("--format=")
             || a.starts_with("-f=")
+            // -o/--output-file: forcing --format json would corrupt the user's output file
+            || a == "--output-file"
+            || a == "-o"
+            || a.starts_with("--output-file=")
         {
             return true;
         }
@@ -127,9 +134,13 @@ fn compress_eslint_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -
         return None;
     }
 
-    // Empty stdout = clean run
+    // empty stdout: clean only on exit 0; json formatter always emits "[]", so empty
+    // + non-zero exit = eslint crashed before output — fall back to real stderr
     if stdout.trim().is_empty() {
-        return Some(String::new());
+        if exit_code == 0 {
+            return Some(String::new());
+        }
+        return None;
     }
 
     // Parse JSON
@@ -202,6 +213,16 @@ fn compress_eslint_with_cwd(stdout: &str, exit_code: i32, cwd: Option<String>) -
     )
 }
 
+// render "line:col"; "-" stands in for missing parts (file-level messages)
+fn format_location(line: Option<u32>, column: Option<u32>) -> String {
+    match (line, column) {
+        (Some(l), Some(c)) => format!("{}:{}", l, c),
+        (Some(l), None) => format!("{}:-", l),
+        (None, Some(c)) => format!("-:{}", c),
+        (None, None) => "-".to_string(),
+    }
+}
+
 fn render_output(
     fatal_entries: &[(String, String)],
     file_groups: &[FileOutput],
@@ -227,7 +248,7 @@ fn render_output(
             let loc_strings: Vec<String> = file_group
                 .problems
                 .iter()
-                .map(|p| format!("{}:{}", p.line, p.column))
+                .map(|p| format_location(p.line, p.column))
                 .collect();
             let max_loc_width = loc_strings.iter().map(|s| s.len()).max().unwrap_or(0);
 
@@ -665,6 +686,53 @@ mod tests {
 
         assert!(result.contains("src/a.ts"), "should contain file path");
         assert!(result.contains("warn"), "should contain warn label");
+    }
+
+    #[test]
+    fn test_ignored_file_message_without_line_column() {
+        // ignored-file warning: no line/column keys -> must still parse and compress
+        let msg = serde_json::json!({
+            "ruleId": serde_json::Value::Null,
+            "fatal": false,
+            "severity": 1,
+            "message": "File ignored because of a matching ignore pattern."
+        });
+        let json = serde_json::json!([make_file("/project/src/ignored.ts", vec![msg], 0, 1, 0, 0)])
+            .to_string();
+        let result = compress(&json).unwrap();
+
+        assert!(result.contains("src/ignored.ts"), "should contain path");
+        assert!(
+            result.contains("File ignored"),
+            "should contain the message; got: {}",
+            result
+        );
+        assert!(
+            result.contains("  -  "),
+            "missing location should render as '-'; got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_can_compress_skip_output_file_long() {
+        assert!(!EslintCompressor.can_compress(&args(&["--output-file", "out.txt"])));
+    }
+
+    #[test]
+    fn test_can_compress_skip_output_file_short() {
+        assert!(!EslintCompressor.can_compress(&args(&["-o", "out.txt"])));
+    }
+
+    #[test]
+    fn test_can_compress_skip_output_file_eq() {
+        assert!(!EslintCompressor.can_compress(&args(&["--output-file=out.txt"])));
+    }
+
+    #[test]
+    fn test_empty_stdout_nonzero_exit_returns_none() {
+        // empty stdout + crash exit -> fall back so stderr passes through
+        assert_eq!(compress_with_exit("", 1), None);
     }
 
     #[test]

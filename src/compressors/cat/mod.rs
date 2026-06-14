@@ -34,22 +34,26 @@ impl Compressor for CatCompressor {
 
         // Binary detection: check first 8KB for NUL bytes
         if is_binary(stdout) {
-            return Some(format!("(binary content, {} bytes)", stdout.len()));
+            // stdout is lossy-converted upstream (main.rs), so invalid bytes became
+            // 3-byte U+FFFD — true file size unrecoverable here, don't claim exact count
+            return Some("(binary content)".to_string());
         }
 
         let mut output = String::new();
         let lines: Vec<&str> = stdout.lines().collect();
 
         for line in lines.iter().take(MAX_LINES) {
-            if line.len() > MINIFIED_THRESHOLD {
+            // count chars not bytes — threshold/report is in chars, multi-byte UTF-8 must not trip early
+            let char_count = line.chars().count();
+            if char_count > MINIFIED_THRESHOLD {
+                // .take on chars keeps preview on a char boundary
                 let preview: String = line.chars().take(MINIFIED_PREVIEW_LEN).collect();
                 if !output.is_empty() {
                     output.push('\n');
                 }
                 output.push_str(&format!(
                     "{}... (line is {} chars, likely minified)",
-                    preview,
-                    line.len()
+                    preview, char_count
                 ));
             } else {
                 if !output.is_empty() {
@@ -189,9 +193,15 @@ mod tests {
     fn test_compress_binary_nul_bytes() {
         let input = "ELF\x00\x01\x02binary content";
         let result = compress(input);
-        let s = result.unwrap();
-        assert!(s.starts_with("(binary content, "));
-        assert!(s.ends_with(" bytes)"));
+        assert_eq!(result, Some("(binary content)".to_string()));
+    }
+
+    #[test]
+    fn test_compress_binary_no_fabricated_byte_count() {
+        // stdout is lossy-converted upstream — must not claim an exact byte count we can't compute
+        let input = "ELF\x00\x01\x02binary content";
+        let s = compress(input).unwrap();
+        assert!(!s.contains("bytes"));
     }
 
     #[test]
@@ -231,6 +241,26 @@ mod tests {
         let s = result.unwrap();
         assert!(s.contains("likely minified"));
         assert!(s.contains("2001 chars"));
+    }
+
+    #[test]
+    fn test_compress_multibyte_under_threshold_not_minified() {
+        // 2000 chars of 3-byte UTF-8 = 6000 bytes; must not trip the char-based threshold
+        let line: String = "あ".repeat(2000);
+        let s = compress(&line).unwrap();
+        assert!(!s.contains("likely minified"));
+        assert_eq!(s, line);
+    }
+
+    #[test]
+    fn test_compress_multibyte_minified_reports_char_count() {
+        // 2500 chars (7500 bytes); report must be chars not bytes
+        let line: String = "あ".repeat(2500);
+        let s = compress(&line).unwrap();
+        assert!(s.contains("likely minified"));
+        assert!(s.contains("2500 chars"));
+        // preview is 200 chars on a char boundary
+        assert!(s.starts_with(&"あ".repeat(MINIFIED_PREVIEW_LEN)));
     }
 
     // --- compress: line cap ---

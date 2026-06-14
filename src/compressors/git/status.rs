@@ -7,16 +7,54 @@ impl Compressor for GitStatusCompressor {
         // Match any `git status` invocation. Safe because only agent/user calls
         // reach token-saver (via shell function). Tools like Oh My Zsh use
         // `command git` which bypasses the function entirely.
-        args.first().map(|s| s.as_str()) == Some("status")
+        if args.first().map(|s| s.as_str()) != Some("status") {
+            return false;
+        }
+
+        // Decline flags that change WHAT is reported in a way the custom
+        // branch:/modified: format can't faithfully represent. The user asking
+        // for a raw machine format expects that exact format back.
+        for arg in &args[1..] {
+            // operands after "--" are pathspecs, not flags
+            if arg == "--" {
+                break;
+            }
+            if requires_passthrough(arg) {
+                return false;
+            }
+        }
+
+        true
     }
 
-    fn normalized_args(&self, _original_args: &[String]) -> Vec<String> {
-        vec![
+    fn normalized_args(&self, original_args: &[String]) -> Vec<String> {
+        let mut result = vec![
             "status".to_string(),
             "--porcelain=v2".to_string(),
             "--branch".to_string(),
             "-z".to_string(),
-        ]
+        ];
+
+        // Forward scope-affecting flags and pathspec operands so the compressed
+        // report matches what the user actually asked about. Raw-format flags
+        // are already declined in can_compress, so they never reach here.
+        let mut after_separator = false;
+        for arg in &original_args[1..] {
+            if after_separator {
+                result.push(arg.clone());
+                continue;
+            }
+            if arg == "--" {
+                after_separator = true;
+                result.push(arg.clone());
+                continue;
+            }
+            if forwardable_flag(arg) || !arg.starts_with('-') {
+                result.push(arg.clone());
+            }
+        }
+
+        result
     }
 
     fn compress(&self, stdout: &str, _stderr: &str, exit_code: i32) -> Option<String> {
@@ -25,6 +63,29 @@ impl Compressor for GitStatusCompressor {
         }
         parse_porcelain_v2(stdout)
     }
+}
+
+/// Flags that ask for a stable raw machine format downstream parsers depend on;
+/// the custom branch:/modified: format would silently break them, so decline.
+/// `-s`/`--short`/`-sb` stay compressible: they're human-oriented, not a
+/// parser contract, and `-sb` is a common quick-status the agent expects compressed.
+fn requires_passthrough(arg: &str) -> bool {
+    matches!(arg, "--porcelain" | "--porcelain=v1" | "--porcelain=v2")
+}
+
+/// Scope/report flags whose effect the v2 parser can still honor; forwarded
+/// verbatim into the normalized command. Untracked/ignored modes change which
+/// files appear but the output stays valid porcelain v2.
+fn forwardable_flag(arg: &str) -> bool {
+    arg == "-uno"
+        || arg == "-unormal"
+        || arg == "-uall"
+        || arg == "--untracked-files"
+        || arg.starts_with("--untracked-files=")
+        || arg == "--ignored"
+        || arg.starts_with("--ignored=")
+        || arg == "--ignore-submodules"
+        || arg.starts_with("--ignore-submodules=")
 }
 
 struct BranchInfo {
@@ -42,6 +103,7 @@ struct FileChanges {
     renamed: Vec<String>,
     conflict: Vec<String>,
     untracked: Vec<String>,
+    ignored: Vec<String>,
 }
 
 fn parse_porcelain_v2(output: &str) -> Option<String> {
@@ -59,6 +121,7 @@ fn parse_porcelain_v2(output: &str) -> Option<String> {
         renamed: Vec::new(),
         conflict: Vec::new(),
         untracked: Vec::new(),
+        ignored: Vec::new(),
     };
 
     // Split on NUL bytes (from -z flag). Filter empty entries.
@@ -95,6 +158,9 @@ fn parse_porcelain_v2(output: &str) -> Option<String> {
             parse_unmerged_entry(entry, &mut files);
         } else if let Some(path) = entry.strip_prefix("? ") {
             files.untracked.push(path.to_string());
+        } else if let Some(path) = entry.strip_prefix("! ") {
+            // ignored entry (only present with --ignored); keep so it's not dropped
+            files.ignored.push(path.to_string());
         }
 
         i += 1;
@@ -124,8 +190,10 @@ fn parse_ordinary_entry(entry: &str, files: &mut FileChanges) {
     }
 
     // Unstaged changes (Y position)
+    // 'A' = intent-to-add (git add -N): tracked, content unstaged in worktree;
+    // report as modified so the file isn't dropped and repo mislabeled clean
     match y {
-        b'M' | b'T' => files.modified.push(path),
+        b'M' | b'T' | b'A' => files.modified.push(path),
         b'D' => files.deleted.push(path),
         _ => {}
     }
@@ -210,6 +278,7 @@ fn format_output(branch: &BranchInfo, files: &FileChanges) -> String {
         ("renamed", &files.renamed),
         ("conflict", &files.conflict),
         ("untracked", &files.untracked),
+        ("ignored", &files.ignored),
     ];
 
     let has_any_files = categories.iter().any(|(_, v)| !v.is_empty());
@@ -258,6 +327,38 @@ mod tests {
         assert_eq!(
             result,
             Some("branch: main (up to date with origin/main)\nmodified: src/main.rs\nuntracked: .claude/".to_string())
+        );
+    }
+
+    #[test]
+    fn test_intent_to_add_reported() {
+        // git add -N: porcelain v2 emits XY='.A'; file must not be dropped
+        let input = "\
+# branch.oid abc123\0\
+# branch.head main\0\
+# branch.upstream origin/main\0\
+# branch.ab +0 -0\0\
+1 .A N... 000000 100644 100644 abc123 def456 src/new.rs\0";
+        let result = compress(input);
+        assert_eq!(
+            result,
+            Some("branch: main (up to date with origin/main)\nmodified: src/new.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ignored_entries_reported() {
+        // --ignored adds '!' entries; must not be dropped when forwarded
+        let input = "\
+# branch.oid abc123\0\
+# branch.head main\0\
+# branch.upstream origin/main\0\
+# branch.ab +0 -0\0\
+! target/\0";
+        let result = compress(input);
+        assert_eq!(
+            result,
+            Some("branch: main (up to date with origin/main)\nignored: target/".to_string())
         );
     }
 
@@ -410,13 +511,84 @@ u UU N... 100644 100644 100644 100644 abc123 def456 789abc src/conflict.rs\0";
     #[test]
     fn test_compress_status_with_flags() {
         let c = GitStatusCompressor;
-        // All git status variants are safe to compress because only agent/user
-        // calls reach token-saver (shell function). Tools use `command git`.
-        assert!(c.can_compress(&["status".into(), "--porcelain".into()]));
+        // Human-oriented variants stay compressible; only agent/user calls reach
+        // token-saver (shell function). Tools use `command git`.
         assert!(c.can_compress(&["status".into(), "-s".into()]));
+        assert!(c.can_compress(&["status".into(), "-sb".into()]));
         assert!(c.can_compress(&["status".into(), "-u".into()]));
         assert!(c.can_compress(&["status".into(), ".".into()]));
-        assert!(c.can_compress(&["status".into(), "--porcelain".into(), "-b".into()]));
+    }
+
+    #[test]
+    fn test_decline_porcelain_machine_format() {
+        let c = GitStatusCompressor;
+        // raw machine format is a parser contract; custom format would break it
+        assert!(!c.can_compress(&["status".into(), "--porcelain".into()]));
+        assert!(!c.can_compress(&["status".into(), "--porcelain=v1".into()]));
+        assert!(!c.can_compress(&["status".into(), "--porcelain".into(), "-b".into()]));
+    }
+
+    #[test]
+    fn test_porcelain_after_separator_still_compresses() {
+        let c = GitStatusCompressor;
+        // after "--" tokens are pathspecs, not flags
+        assert!(c.can_compress(&["status".into(), "--".into(), "--porcelain".into()]));
+    }
+
+    #[test]
+    fn test_normalized_args_forwards_pathspec() {
+        let result = GitStatusCompressor.normalized_args(&["status".into(), "src/".into()]);
+        assert_eq!(
+            result,
+            vec!["status", "--porcelain=v2", "--branch", "-z", "src/"]
+        );
+    }
+
+    #[test]
+    fn test_normalized_args_forwards_pathspec_after_separator() {
+        let result = GitStatusCompressor.normalized_args(&[
+            "status".into(),
+            "--".into(),
+            "src/main.rs".into(),
+        ]);
+        assert_eq!(
+            result,
+            vec![
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "-z",
+                "--",
+                "src/main.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_normalized_args_forwards_untracked_and_ignored() {
+        let result = GitStatusCompressor.normalized_args(&[
+            "status".into(),
+            "-uno".into(),
+            "--ignored".into(),
+        ]);
+        assert_eq!(
+            result,
+            vec![
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "-z",
+                "-uno",
+                "--ignored"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_normalized_args_drops_format_only_flags() {
+        // -sb/-b change format not scope; v2 parser overrides format anyway
+        let result = GitStatusCompressor.normalized_args(&["status".into(), "-sb".into()]);
+        assert_eq!(result, vec!["status", "--porcelain=v2", "--branch", "-z"]);
     }
 
     #[test]

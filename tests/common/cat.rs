@@ -33,10 +33,7 @@ pub fn scenarios() -> Vec<Scenario> {
             command: "cat",
             args: &["binary.bin"],
             setup: setup_binary_file,
-            assertions: vec![
-                Assertion::Contains("(binary content, "),
-                Assertion::Contains(" bytes)"),
-            ],
+            assertions: vec![Assertion::Contains("(binary content)")],
         },
         Scenario {
             name: "Minified line collapsing",

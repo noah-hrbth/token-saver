@@ -38,7 +38,13 @@ pub(crate) fn matches(args: &[String]) -> bool {
         return false; // create / rename / --list <pattern> / start-point
     }
     !args.iter().skip(1).any(|a| {
-        MUTATION_FLAGS.contains(&a.as_str()) || a.starts_with("--format") || a == "--show-current"
+        MUTATION_FLAGS.contains(&a.as_str())
+            // decline "=value" forms of mutation flags (e.g. --set-upstream-to=ref)
+            || MUTATION_FLAGS
+                .iter()
+                .any(|f| f.starts_with("--") && a.starts_with(&format!("{}=", f)))
+            || a.starts_with("--format")
+            || a == "--show-current"
     })
 }
 
@@ -65,10 +71,16 @@ fn has_create_positional(args: &[String]) -> bool {
     false
 }
 
+/// True if `arg` is a single-dash short-flag bundle (e.g. "-av"), not a long option.
+fn is_short_bundle(arg: &str) -> bool {
+    arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1
+}
+
 /// True when any verbose flag is present (used by the dispatcher to set the field).
+/// Also detects `v` inside a single-dash bundle (e.g. "-av").
 pub(crate) fn is_verbose(args: &[String]) -> bool {
     args.iter()
-        .any(|a| a == "-v" || a == "-vv" || a == "--verbose")
+        .any(|a| a == "--verbose" || (is_short_bundle(a) && a.contains('v')))
 }
 
 impl Compressor for GitBranchCompressor {
@@ -92,6 +104,21 @@ impl Compressor for GitBranchCompressor {
                 "-r" | "--remotes" | "-a" | "--all" => {
                     result.push(args[i].clone());
                 }
+                // ordering/selection only — safe to forward to the real command
+                "--ignore-case" | "-i" => {
+                    result.push(args[i].clone());
+                }
+                "--sort" => {
+                    result.push(args[i].clone());
+                    // sort takes a space-separated key value
+                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                        result.push(args[i + 1].clone());
+                        i += 1;
+                    }
+                }
+                _ if arg.starts_with("--sort=") => {
+                    result.push(args[i].clone());
+                }
                 _ if FILTER_FLAGS.contains(&arg) => {
                     result.push(args[i].clone());
                     // Next arg is the value if it doesn't start with -
@@ -105,6 +132,14 @@ impl Compressor for GitBranchCompressor {
                     .any(|f| arg.starts_with(&format!("{}=", f))) =>
                 {
                     result.push(args[i].clone());
+                }
+                // single-dash bundle (e.g. -av): extract -a/-r; verbosity comes from --format
+                _ if is_short_bundle(arg) => {
+                    if arg.contains('a') {
+                        result.push("-a".to_string());
+                    } else if arg.contains('r') {
+                        result.push("-r".to_string());
+                    }
                 }
                 _ => {} // drop -v, -vv, etc. (--format replaces them)
             }
@@ -137,7 +172,8 @@ struct BranchEntry {
 }
 
 fn parse_line(line: &str) -> Option<BranchEntry> {
-    let fields: Vec<&str> = line.split('\t').collect();
+    // splitn(8): subject is the LAST format field — cap split so a tab inside it is kept
+    let fields: Vec<&str> = line.splitn(8, '\t').collect();
     if fields.len() < 2 {
         return None;
     }
@@ -576,5 +612,75 @@ mod tests {
     #[test]
     fn verbose_flag_still_compresses() {
         assert!(GitBranchCompressor { verbose: true }.can_compress(&args(&["branch", "-v"])));
+    }
+
+    /// Fix 1: "=value" form of a mutation flag must decline (it mutates upstream)
+    #[test]
+    fn set_upstream_to_eq_form_declines() {
+        let c = GitBranchCompressor { verbose: false };
+        assert!(!c.can_compress(&args(&["branch", "--set-upstream-to=origin/main"])));
+        // bare-token form already declined (regression guard)
+        assert!(!c.can_compress(&args(&["branch", "--set-upstream-to", "origin/main"])));
+    }
+
+    /// Fix 2: bundled short flags expand to -a/-r in normalized_args
+    #[test]
+    fn bundled_short_flags_expand_remotes() {
+        let c = GitBranchCompressor { verbose: false };
+        let result = c.normalized_args(&args(&["branch", "-av"]));
+        assert!(result.contains(&"-a".to_string()), "got: {:?}", result);
+        let result = c.normalized_args(&args(&["branch", "-rv"]));
+        assert!(result.contains(&"-r".to_string()), "got: {:?}", result);
+    }
+
+    /// Fix 2: verbosity detected inside a single-dash bundle
+    #[test]
+    fn bundled_verbose_detected() {
+        assert!(is_verbose(&args(&["branch", "-av"])));
+        assert!(is_verbose(&args(&["branch", "-va"])));
+        assert!(!is_verbose(&args(&["branch", "-a"])));
+        // long option must not be misclassified
+        assert!(!is_verbose(&args(&["branch", "--all"])));
+    }
+
+    /// Fix 3: --sort and --ignore-case forwarded (ordering/selection is safe to honor)
+    #[test]
+    fn sort_and_ignore_case_forwarded() {
+        let c = GitBranchCompressor { verbose: false };
+        let result = c.normalized_args(&args(&["branch", "--sort=committerdate"]));
+        assert!(
+            result.contains(&"--sort=committerdate".to_string()),
+            "got: {:?}",
+            result
+        );
+        let result = c.normalized_args(&args(&["branch", "--sort", "committerdate"]));
+        assert!(result.contains(&"--sort".to_string()), "got: {:?}", result);
+        assert!(
+            result.contains(&"committerdate".to_string()),
+            "got: {:?}",
+            result
+        );
+        let result = c.normalized_args(&args(&["branch", "--ignore-case"]));
+        assert!(
+            result.contains(&"--ignore-case".to_string()),
+            "got: {:?}",
+            result
+        );
+        let result = c.normalized_args(&args(&["branch", "-i"]));
+        assert!(result.contains(&"-i".to_string()), "got: {:?}", result);
+    }
+
+    /// Fix 4: a tab inside the commit subject is preserved (subject is last field)
+    #[test]
+    fn subject_with_tab_preserved() {
+        let raw = "*\tmain\torigin/main\t\t\trefs/heads/main\tabc1234\tcol1\tcol2\n";
+        let result = GitBranchCompressor { verbose: true }
+            .compress(raw, "", 0)
+            .unwrap();
+        assert!(
+            result.contains("col1\tcol2"),
+            "Expected full subject with tab, got: {}",
+            result
+        );
     }
 }

@@ -18,8 +18,11 @@ pub fn find_compressor(args: &[String]) -> Option<Box<dyn Compressor>> {
     if diff::GitDiffCompressor.can_compress(args) {
         return Some(Box::new(diff::GitDiffCompressor));
     }
-    if log::GitLogCompressor.can_compress(args) {
-        return Some(Box::new(log::GitLogCompressor));
+    let log_compressor = log::GitLogCompressor {
+        user_limit: log::user_specified_count(args),
+    };
+    if log_compressor.can_compress(args) {
+        return Some(Box::new(log_compressor));
     }
     if show::GitShowCompressor.can_compress(args) {
         return Some(Box::new(show::GitShowCompressor));

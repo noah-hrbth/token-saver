@@ -24,6 +24,8 @@ const SKIP_FLAGS: &[&str] = &[
     "--color",
     "--color=always",
     "--ext-diff",
+    // binary patch: "GIT binary patch" + base85 lines match no parser pattern
+    "--binary",
 ];
 
 /// Returns true if `--stat` or `--stat=<width>` is in the args (but not `--shortstat`).
@@ -31,6 +33,14 @@ fn has_stat_flag(args: &[String]) -> bool {
     args[1..]
         .iter()
         .any(|a| a == "--stat" || a.starts_with("--stat="))
+}
+
+/// Returns true if any diff header has a C-quoted path, e.g.
+/// `diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"`. git quotes
+/// non-ASCII/special filenames by default (core.quotepath); the path
+/// extractor can't unquote them, so callers should decline compression.
+fn has_quoted_header(stdout: &str) -> bool {
+    stdout.lines().any(|line| line.starts_with("diff --git \""))
 }
 
 impl Compressor for GitDiffCompressor {
@@ -43,6 +53,11 @@ impl Compressor for GitDiffCompressor {
 
         let tail = &args[1..];
         if tail.iter().any(|arg| SKIP_FLAGS.contains(&arg.as_str())) {
+            return false;
+        }
+
+        // word-diff variants (=plain/=color/-regex=) have no +/- line prefixes
+        if tail.iter().any(|arg| arg.starts_with("--word-diff")) {
             return false;
         }
 
@@ -93,9 +108,20 @@ impl Compressor for GitDiffCompressor {
             return Some(String::new());
         }
 
-        // Stat output: contains " | " bars but no unified diff markers
-        if !stdout.contains("diff --git ") && stdout.contains(" | ") {
+        // Stat output: contains " | " bars but no unified diff markers.
+        // Anchor the diff check exactly like parse_diff (start-of-output or
+        // "\ndiff --git "), so a stat line that merely contains the literal
+        // substring "diff --git " doesn't get misrouted to the diff branch.
+        let is_unified_diff = stdout.starts_with("diff --git ") || stdout.contains("\ndiff --git ");
+        if !is_unified_diff && stdout.contains(" | ") {
             return Some(compress_stat(stdout));
+        }
+
+        // C-quoted headers (core.quotepath default) wrap non-ASCII/special
+        // paths in double quotes with octal escapes; the parser can't faithfully
+        // unquote them, so decline -> passthrough rather than emit a garbled path
+        if has_quoted_header(stdout) {
+            return None;
         }
 
         let files = parse_diff(stdout);
@@ -223,6 +249,20 @@ mod tests {
     #[test]
     fn skip_diff_ext_diff() {
         assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--ext-diff"])));
+    }
+
+    #[test]
+    fn skip_diff_binary() {
+        // --binary emits "GIT binary patch" + base85 lines the parser can't represent
+        assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--binary"])));
+    }
+
+    #[test]
+    fn skip_diff_word_diff_variants() {
+        // word-diff variants have no +/- line prefixes; all must decline
+        assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--word-diff=plain"])));
+        assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--word-diff=color"])));
+        assert!(!GitDiffCompressor.can_compress(&args(&["diff", "--word-diff-regex=."])));
     }
 
     // --- normalized_args ---
@@ -528,6 +568,27 @@ mod tests {
     #[test]
     fn compress_garbage_input_returns_none() {
         let result = GitDiffCompressor.compress("not a diff at all", "", 0);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn compress_stat_line_containing_diff_git_substring_routes_to_stat() {
+        // filename embeds the literal "diff --git " substring; routing must NOT
+        // be misled into the unified-diff branch (anchored on \n / start-of-line)
+        let input = " a diff --git b.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n";
+        let result = GitDiffCompressor.compress(input, "", 0).unwrap();
+        assert!(
+            result.contains("a diff --git b.txt | 1+ 1-"),
+            "stat line with embedded 'diff --git ' should compress as stat, got:\n{}",
+            result
+        );
+    }
+
+    #[test]
+    fn compress_quoted_header_returns_none() {
+        // C-quoted path (core.quotepath) can't be unquoted faithfully -> passthrough
+        let input = "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\nindex d95f3ad..5ea2ed4 100644\n--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-content\n+changed\n";
+        let result = GitDiffCompressor.compress(input, "", 0);
         assert_eq!(result, None);
     }
 }
