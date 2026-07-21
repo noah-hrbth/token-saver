@@ -1,8 +1,9 @@
+use crate::agents;
 use crate::shell_hook::{HOOK_MARKER, is_token_saver_hook};
-use serde_json::{Map, Value};
+use crate::wizard;
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 const COMMANDS: &[&str] = &[
@@ -11,12 +12,19 @@ const COMMANDS: &[&str] = &[
 
 /// Dispatch entry point for `token-saver install [shell]`.
 ///
-/// - `install` (no args): auto-detect shell, edit profile, edit `~/.claude/settings.json`.
+/// - `install` (no args): interactive wizard on a TTY; silent global setup
+///   (shell profile + claude settings) otherwise.
 /// - `install zsh|bash`: print the shell-function block (for `eval "$(...)"` use).
 pub fn run(args: &[String]) -> i32 {
     let binary = current_binary_path();
     match args.first().map(String::as_str) {
-        None => auto(&binary),
+        None => {
+            if io::stdin().is_terminal() {
+                wizard::run(&binary)
+            } else {
+                auto(&binary)
+            }
+        }
         Some(shell) => print_block(shell, &binary),
     }
 }
@@ -124,12 +132,19 @@ fn auto(binary: &str) -> i32 {
     }
 
     let settings = home.join(".claude").join("settings.json");
-    if let Err(e) = update_claude_settings(&settings) {
-        eprintln!(
-            "token-saver install: failed to update {}: {e}",
+    match agents::claude::write_env(&settings) {
+        Ok(true) => println!("Added TOKEN_SAVER=1 to {}", settings.display()),
+        Ok(false) => println!(
+            "TOKEN_SAVER=1 already present in {} — skipping",
             settings.display()
-        );
-        return 1;
+        ),
+        Err(e) => {
+            eprintln!(
+                "token-saver install: failed to update {}: {e}",
+                settings.display()
+            );
+            return 1;
+        }
     }
 
     println!();
@@ -138,7 +153,7 @@ fn auto(binary: &str) -> i32 {
     0
 }
 
-fn detect_shell() -> Option<String> {
+pub(crate) fn detect_shell() -> Option<String> {
     let shell = env::var("SHELL").ok()?;
     let name = Path::new(&shell).file_name()?.to_string_lossy().to_string();
     match name.as_str() {
@@ -147,7 +162,7 @@ fn detect_shell() -> Option<String> {
     }
 }
 
-fn profile_path(home: &Path, shell: &str) -> PathBuf {
+pub(crate) fn profile_path(home: &Path, shell: &str) -> PathBuf {
     match shell {
         "zsh" => home.join(".zshenv"),
         "bash" => home.join(".bashrc"),
@@ -155,7 +170,14 @@ fn profile_path(home: &Path, shell: &str) -> PathBuf {
     }
 }
 
-fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()> {
+/// True when the profile already contains a token-saver eval hook.
+pub(crate) fn profile_has_hook(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|content| content.lines().any(|l| is_token_saver_hook(l.trim_start())))
+        .unwrap_or(false)
+}
+
+pub(crate) fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let quoted = shell_single_quote(binary);
     let canonical = format!(r#"eval "$({quoted} install {shell})""#);
@@ -241,54 +263,6 @@ fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()
         .open(path)?;
     file.write_all(block.as_bytes())?;
     println!("Added shell hook to {}", path.display());
-    Ok(())
-}
-
-fn update_claude_settings(path: &Path) -> io::Result<()> {
-    let raw = fs::read_to_string(path).unwrap_or_default();
-    let mut value: Value = if raw.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        serde_json::from_str(&raw).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("parse settings.json: {e}"),
-            )
-        })?
-    };
-
-    let obj = value.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "settings.json root is not an object",
-        )
-    })?;
-    let env_entry = obj
-        .entry("env".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    let env_obj = env_entry.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "settings.json `env` is not an object",
-        )
-    })?;
-
-    if env_obj.get("TOKEN_SAVER").and_then(Value::as_str) == Some("1") {
-        println!(
-            "TOKEN_SAVER=1 already present in {} — skipping",
-            path.display()
-        );
-        return Ok(());
-    }
-
-    env_obj.insert("TOKEN_SAVER".to_string(), Value::String("1".to_string()));
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let serialized = serde_json::to_string_pretty(&value).expect("Value always serializes");
-    fs::write(path, format!("{serialized}\n"))?;
-    println!("Added TOKEN_SAVER=1 to {}", path.display());
     Ok(())
 }
 
@@ -466,60 +440,5 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("export FOO=bar\n"));
         assert!(content.contains("eval \"$('/opt/homebrew/bin/token-saver' install zsh)\""));
-    }
-
-    #[test]
-    fn claude_settings_creates_directory_and_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(".claude/settings.json");
-        update_claude_settings(&path).unwrap();
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["env"]["TOKEN_SAVER"], "1");
-    }
-
-    #[test]
-    fn claude_settings_preserves_other_keys_and_env_entries() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            r#"{ "model": "sonnet", "env": { "OTHER": "value" } }"#,
-        )
-        .unwrap();
-        update_claude_settings(&path).unwrap();
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["model"], "sonnet");
-        assert_eq!(value["env"]["OTHER"], "value");
-        assert_eq!(value["env"]["TOKEN_SAVER"], "1");
-    }
-
-    #[test]
-    fn claude_settings_idempotent_when_already_set() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let original = "{\n  \"env\": {\n    \"TOKEN_SAVER\": \"1\"\n  }\n}\n";
-        fs::write(&path, original).unwrap();
-        update_claude_settings(&path).unwrap();
-        let after = fs::read_to_string(&path).unwrap();
-        assert_eq!(after, original);
-    }
-
-    #[test]
-    fn claude_settings_handles_empty_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "").unwrap();
-        update_claude_settings(&path).unwrap();
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["env"]["TOKEN_SAVER"], "1");
-    }
-
-    #[test]
-    fn claude_settings_rejects_non_object_root() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "[1, 2, 3]").unwrap();
-        let err = update_claude_settings(&path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

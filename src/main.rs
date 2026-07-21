@@ -1,8 +1,10 @@
+mod agents;
 mod compressors;
 mod install;
 mod runner;
 mod shell_hook;
 mod uninstall;
+mod wizard;
 
 use std::env;
 use std::ffi::OsString;
@@ -46,13 +48,13 @@ fn main() {
                     "    token-saver <command> [args...]    Run command with compression (when TOKEN_SAVER=1)"
                 );
                 println!(
-                    "    token-saver install                Auto-configure shell profile + Claude Code settings.json"
+                    "    token-saver install                Interactive setup wizard (shell profile + agent configs)"
                 );
                 println!(
                     "    token-saver install <shell>        Print shell-function block (zsh|bash)"
                 );
                 println!(
-                    "    token-saver uninstall              Reverse `install` (clean shell profile + settings.json)"
+                    "    token-saver uninstall              Reverse `install` (shell profile + agent configs)"
                 );
                 println!("    token-saver version                Print version");
                 println!();

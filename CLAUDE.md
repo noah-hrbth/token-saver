@@ -19,7 +19,7 @@ Run `cargo fmt` and `cargo clippy` after changes. Use `/verify` to run all check
 
 ## Architecture
 
-token-saver is a transparent CLI proxy that compresses verbose command output for LLM agents. It intercepts commands via shell functions (installed by `scripts/install.sh`), runs the real binary with machine-parseable flags, then compresses the output. When `TOKEN_SAVER=1` is not set, it passes through to the real command unchanged.
+token-saver is a transparent CLI proxy that compresses verbose command output for LLM agents. It intercepts commands via shell functions (installed by `token-saver install`), runs the real binary with machine-parseable flags, then compresses the output. When `TOKEN_SAVER=1` is not set, it passes through to the real command unchanged.
 
 ### Execution flow (`src/main.rs`)
 
@@ -56,11 +56,11 @@ Dispatch chain: `find_compressor(command, args)` → `git::find_compressor(args)
 1. Create `src/compressors/<command>/<subcommand>.rs` implementing `Compressor`
 2. Register in `src/compressors/<command>/mod.rs` dispatcher
 3. Add unit tests in the module + integration test scenarios in `tests/common/`
-4. Add the command to the shell function block in `scripts/install.sh`
+4. Add the command to `COMMANDS` in `src/install.rs` (the shell-function block)
 
 ## Key Design Decisions
 
-- **Shell functions, not PATH manipulation**: `scripts/install.sh` installs guarded shell functions (only active when `TOKEN_SAVER=1`). Tools using `command git` bypass the function and hit real git — this is intentional and critical for compatibility with Oh My Zsh, IDE integrations, etc.
+- **Shell functions, not PATH manipulation**: `token-saver install` installs guarded shell functions (only active when `TOKEN_SAVER=1`). Tools using `command git` bypass the function and hit real git — this is intentional and critical for compatibility with Oh My Zsh, IDE integrations, etc.
 - **Graceful fallback**: if compression fails or returns `None`, token-saver re-execs with the original args. The agent never sees an error from token-saver itself.
 - **Minimal dependencies at runtime**: `serde` and `serde_json` for JSON-based compressors (eslint). Dev-dependencies (`tempfile`, `tiktoken-rs`) are used for testing.
 - **Rust edition 2024**.

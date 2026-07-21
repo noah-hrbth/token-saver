@@ -1,5 +1,6 @@
+use crate::agents::{Scope, ScriptableAgent};
 use crate::shell_hook::is_token_saver_hook;
-use serde_json::Value;
+use crate::wizard;
 use std::env;
 use std::fs;
 use std::io;
@@ -9,11 +10,11 @@ use std::path::{Path, PathBuf};
 ///
 /// Reverses what `token-saver install` did:
 /// - strips token-saver lines from `~/.zshenv` and `~/.bashrc`
-/// - removes `TOKEN_SAVER` from `~/.claude/settings.json`
+/// - erases agent configs (claude/pi/codex), global and in the current repo
+/// - removes the legacy `~/.token-saver/bin` binary from the install.sh era
 ///
-/// The binary itself is removed by `scripts/uninstall.sh` (a process can't
-/// reliably delete its own executable across platforms, and we want this
-/// subcommand to be safe to call repeatedly).
+/// The package-manager-installed binary itself is removed via
+/// `cargo uninstall token-saver` / `brew uninstall token-saver`.
 pub fn run(args: &[String]) -> i32 {
     if let Some(extra) = args.first() {
         eprintln!("token-saver uninstall: unexpected argument '{extra}'");
@@ -47,18 +48,18 @@ fn auto() -> i32 {
         }
     }
 
-    let settings = home.join(".claude").join("settings.json");
-    match clean_claude_settings(&settings) {
-        Ok(true) => println!("Removed TOKEN_SAVER from {}", settings.display()),
-        Ok(false) => {}
-        Err(e) => {
-            eprintln!(
-                "token-saver uninstall: failed to clean {}: {e}",
-                settings.display()
-            );
-            errors += 1;
+    for agent in ScriptableAgent::ALL {
+        erase_agent(agent, Scope::Global, &home, &mut errors);
+    }
+
+    let root = wizard::project_root();
+    if root != home {
+        for agent in ScriptableAgent::ALL {
+            erase_agent(agent, Scope::Project, &root, &mut errors);
         }
     }
+
+    remove_legacy_binary(&home, &mut errors);
 
     if errors > 0 {
         return 1;
@@ -67,6 +68,43 @@ fn auto() -> i32 {
     println!();
     println!("Reload your shell to drop the wrappers (e.g. `source ~/.zshenv`).");
     0
+}
+
+/// Erase one agent target's config, printing removals. Non-fatal: errors
+/// are reported and counted, cleanup continues.
+fn erase_agent(agent: ScriptableAgent, scope: Scope, root: &Path, errors: &mut i32) {
+    let path = agent.config_path(scope, root);
+    match agent.erase(scope, root) {
+        Ok(true) => println!("Removed token-saver config from {}", path.display()),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!(
+                "token-saver uninstall: failed to clean {}: {e}",
+                path.display()
+            );
+            *errors += 1;
+        }
+    }
+}
+
+/// Remove the binary left by the legacy scripts/install.sh era. New installs
+/// are owned by the package manager (cargo/brew), not by us.
+fn remove_legacy_binary(home: &Path, errors: &mut i32) {
+    let binary = home.join(".token-saver").join("bin").join("token-saver");
+    match fs::remove_file(&binary) {
+        Ok(()) => println!("Removed legacy binary {}", binary.display()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "token-saver uninstall: failed to remove {}: {e}",
+                binary.display()
+            );
+            *errors += 1;
+        }
+    }
+    // tidy up if the dirs are now empty; non-empty is fine, ignore failures
+    let _ = fs::remove_dir(home.join(".token-saver").join("bin"));
+    let _ = fs::remove_dir(home.join(".token-saver"));
 }
 
 /// Remove every token-saver-related line from a shell profile.
@@ -144,52 +182,6 @@ fn strip_token_saver_lines(content: &str) -> Option<String> {
         s.push('\n');
         Some(s)
     }
-}
-
-/// Remove `TOKEN_SAVER` from the `env` object in `~/.claude/settings.json`.
-///
-/// Drops the surrounding `env` key entirely if it becomes empty so we don't
-/// leave dangling structure behind. Returns `Ok(false)` when the file is
-/// missing, empty, or the key wasn't there.
-fn clean_claude_settings(path: &Path) -> io::Result<bool> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-
-    if raw.trim().is_empty() {
-        return Ok(false);
-    }
-
-    let mut value: Value = serde_json::from_str(&raw).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("parse settings.json: {e}"),
-        )
-    })?;
-
-    let obj = match value.as_object_mut() {
-        Some(o) => o,
-        None => return Ok(false),
-    };
-
-    let env_obj = match obj.get_mut("env").and_then(Value::as_object_mut) {
-        Some(o) => o,
-        None => return Ok(false),
-    };
-
-    if env_obj.remove("TOKEN_SAVER").is_none() {
-        return Ok(false);
-    }
-
-    if env_obj.is_empty() {
-        obj.remove("env");
-    }
-
-    let serialized = serde_json::to_string_pretty(&value).expect("Value always serializes");
-    fs::write(path, format!("{serialized}\n"))?;
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -277,70 +269,5 @@ mod tests {
         .unwrap();
         assert!(clean_shell_profile(&path).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), "export FOO=1\n");
-    }
-
-    #[test]
-    fn clean_claude_settings_removes_token_saver_and_preserves_rest() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            r#"{ "model": "sonnet", "env": { "OTHER": "value", "TOKEN_SAVER": "1" } }"#,
-        )
-        .unwrap();
-        assert!(clean_claude_settings(&path).unwrap());
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["model"], "sonnet");
-        assert_eq!(value["env"]["OTHER"], "value");
-        assert!(value["env"].get("TOKEN_SAVER").is_none());
-    }
-
-    #[test]
-    fn clean_claude_settings_drops_empty_env_object() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(
-            &path,
-            r#"{ "model": "sonnet", "env": { "TOKEN_SAVER": "1" } }"#,
-        )
-        .unwrap();
-        assert!(clean_claude_settings(&path).unwrap());
-        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(value["model"], "sonnet");
-        assert!(value.as_object().unwrap().get("env").is_none());
-    }
-
-    #[test]
-    fn clean_claude_settings_returns_false_when_key_absent() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let original = "{\n  \"model\": \"sonnet\"\n}\n";
-        fs::write(&path, original).unwrap();
-        assert!(!clean_claude_settings(&path).unwrap());
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
-    }
-
-    #[test]
-    fn clean_claude_settings_returns_false_for_missing_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        assert!(!clean_claude_settings(&path).unwrap());
-    }
-
-    #[test]
-    fn clean_claude_settings_returns_false_for_empty_file() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "").unwrap();
-        assert!(!clean_claude_settings(&path).unwrap());
-    }
-
-    #[test]
-    fn clean_claude_settings_rejects_invalid_json() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        fs::write(&path, "{ not json").unwrap();
-        let err = clean_claude_settings(&path).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }

@@ -50,3 +50,11 @@ Tracking which command compressors are implemented and which are planned.
 
 - [ ] `docker build` — strip layer-by-layer output, show: success/fail, image ID, warnings
 - [ ] `docker ps` — compact format: name, status, ports only
+
+## Agent integrations (research)
+
+Agents the install wizard cannot auto-configure yet — they fall back to printed
+manual instructions. Research deeper before they become scriptable targets:
+
+- [ ] `opencode` — no documented config mechanism to inject env (`TOKEN_SAVER=1`) into tool subprocesses; only `{env:...}` substitution exists. Research: plugin/hook API or upstream feature request
+- [ ] `cursor cli` — shell execution + env injection mechanism unknown (config docs are JS-rendered). Research: how cursor-agent spawns commands and where env can be set, global + project

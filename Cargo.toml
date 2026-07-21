@@ -13,8 +13,10 @@ keywords = ["llm", "cli", "claude", "agent", "compression"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+dialoguer = "0.12.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml_edit = "0.25.13"
 
 [dev-dependencies]
 tempfile = "3"
