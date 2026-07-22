@@ -59,7 +59,7 @@ fn auto() -> i32 {
         }
     }
 
-    remove_legacy_binary(&home, &mut errors);
+    remove_legacy_binary(&home);
 
     if errors > 0 {
         return 1;
@@ -88,19 +88,18 @@ fn erase_agent(agent: ScriptableAgent, scope: Scope, root: &Path, errors: &mut i
 }
 
 /// Remove the binary left by the legacy scripts/install.sh era. New installs
-/// are owned by the package manager (cargo/brew), not by us.
-fn remove_legacy_binary(home: &Path, errors: &mut i32) {
+/// are owned by the package manager (cargo/brew), not by us. Best-effort:
+/// a failure here (e.g. deleting a running exe on Windows) only warns and
+/// never fails the uninstall.
+fn remove_legacy_binary(home: &Path) {
     let binary = home.join(".token-saver").join("bin").join("token-saver");
     match fs::remove_file(&binary) {
         Ok(()) => println!("Removed legacy binary {}", binary.display()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => {
-            eprintln!(
-                "token-saver uninstall: failed to remove {}: {e}",
-                binary.display()
-            );
-            *errors += 1;
-        }
+        Err(e) => eprintln!(
+            "token-saver uninstall: could not remove legacy binary {} ({e}) — ignoring",
+            binary.display()
+        ),
     }
     // tidy up if the dirs are now empty; non-empty is fine, ignore failures
     let _ = fs::remove_dir(home.join(".token-saver").join("bin"));

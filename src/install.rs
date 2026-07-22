@@ -153,6 +153,7 @@ fn auto(binary: &str) -> i32 {
     0
 }
 
+/// Detect a supported shell (zsh|bash) from `$SHELL`, else None.
 pub(crate) fn detect_shell() -> Option<String> {
     let shell = env::var("SHELL").ok()?;
     let name = Path::new(&shell).file_name()?.to_string_lossy().to_string();
@@ -162,6 +163,7 @@ pub(crate) fn detect_shell() -> Option<String> {
     }
 }
 
+/// Profile file token-saver writes its hook into for a given shell.
 pub(crate) fn profile_path(home: &Path, shell: &str) -> PathBuf {
     match shell {
         "zsh" => home.join(".zshenv"),
@@ -177,6 +179,8 @@ pub(crate) fn profile_has_hook(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Append (or refresh) the token-saver eval hook in a shell profile,
+/// stripping any stale token-saver lines first. Idempotent.
 pub(crate) fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io::Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
     let quoted = shell_single_quote(binary);

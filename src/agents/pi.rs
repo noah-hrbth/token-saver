@@ -53,7 +53,8 @@ pub fn write_prefix(path: &Path) -> io::Result<bool> {
 
 /// Remove the token-saver snippet, preserving any user prefix. Drops the
 /// `shellCommandPrefix` key if nothing remains. Returns Ok(true) when the
-/// file changed, Ok(false) when the snippet was absent.
+/// file changed, Ok(false) when the exact snippet was absent (including
+/// marker-only drift from an older release).
 pub fn erase_prefix(path: &Path) -> io::Result<bool> {
     let mut obj = match read_json_object(path)? {
         Some(o) => o,
@@ -65,8 +66,12 @@ pub fn erase_prefix(path: &Path) -> io::Result<bool> {
         _ => return Ok(false),
     };
 
-    let cleaned = existing.replace(PREFIX_SNIPPET, "");
-    let cleaned = cleaned.trim();
+    let cleaned_full = existing.replace(PREFIX_SNIPPET, "");
+    // marker present but our exact snippet not found (e.g. version drift) — leave user content untouched
+    if cleaned_full == existing {
+        return Ok(false);
+    }
+    let cleaned = cleaned_full.trim();
     if cleaned.is_empty() {
         obj.remove("shellCommandPrefix");
     } else {
@@ -191,6 +196,17 @@ mod tests {
         assert!(erase_prefix(&path).unwrap());
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["shellCommandPrefix"], "shopt -s expand_aliases");
+    }
+
+    #[test]
+    fn erase_returns_false_on_snippet_drift() {
+        // marker present but exact snippet differs (simulated older release) — leave untouched
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let stale = "{ \"shellCommandPrefix\": \"# token-saver\\nexport TOKEN_SAVER=1\" }";
+        fs::write(&path, stale).unwrap();
+        assert!(!erase_prefix(&path).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), stale);
     }
 
     #[test]

@@ -225,39 +225,57 @@ fn step_agents(
         return Ok((vec!["agents       none selected".to_string()], false));
     }
 
-    let scriptable_count = ScriptableAgent::ALL.len();
     let mut outcomes = Vec::new();
     let mut failed = false;
     for idx in picked {
-        if idx < scriptable_count {
-            let agent = ScriptableAgent::ALL[idx];
-            let path = display_path(&agent.config_path(scope, root), home);
-            match agent.write(scope, root) {
-                Ok(true) => {
-                    println!("Configured {} ({path})", agent.name());
-                    outcomes.push(format!("{:<13} configured → {path}", agent.name()));
-                }
-                Ok(false) => {
-                    println!("{} already configured — skipping", agent.name());
-                    outcomes.push(format!("{:<13} already configured", agent.name()));
-                }
-                Err(e) => {
-                    eprintln!(
-                        "token-saver install: failed to configure {}: {e}",
-                        agent.name()
-                    );
-                    outcomes.push(format!("{:<13} failed — {e}", agent.name()));
-                    failed = true;
+        match resolve_pick(idx) {
+            AgentPick::Scriptable(agent) => {
+                let path = display_path(&agent.config_path(scope, root), home);
+                match agent.write(scope, root) {
+                    Ok(true) => {
+                        println!("Configured {} ({path})", agent.name());
+                        outcomes.push(format!("{:<13} configured → {path}", agent.name()));
+                    }
+                    Ok(false) => {
+                        println!("{} already configured — skipping", agent.name());
+                        outcomes.push(format!("{:<13} already configured", agent.name()));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "token-saver install: failed to configure {}: {e}",
+                            agent.name()
+                        );
+                        outcomes.push(format!("{:<13} failed — {e}", agent.name()));
+                        failed = true;
+                    }
                 }
             }
-        } else {
-            let agent = ManualAgent::ALL[idx - scriptable_count];
-            println!();
-            println!("{}", agent.manual_instructions());
-            outcomes.push(format!("{:<13} manual instructions printed", agent.name()));
+            AgentPick::Manual(agent) => {
+                println!();
+                println!("{}", agent.manual_instructions());
+                outcomes.push(format!("{:<13} manual instructions printed", agent.name()));
+            }
         }
     }
     Ok((outcomes, failed))
+}
+
+/// A checkbox index resolved to its concrete agent target.
+enum AgentPick {
+    Scriptable(ScriptableAgent),
+    Manual(ManualAgent),
+}
+
+/// Map a MultiSelect index to its agent. Items are listed scriptable-first
+/// (`ScriptableAgent::ALL`) then manual (`ManualAgent::ALL`), so the index
+/// space is `[0, scriptable_count)` for scriptable and the remainder manual.
+fn resolve_pick(idx: usize) -> AgentPick {
+    let scriptable_count = ScriptableAgent::ALL.len();
+    if idx < scriptable_count {
+        AgentPick::Scriptable(ScriptableAgent::ALL[idx])
+    } else {
+        AgentPick::Manual(ManualAgent::ALL[idx - scriptable_count])
+    }
 }
 
 /// Checkbox label for a scriptable agent, reflecting existing state.
@@ -329,6 +347,27 @@ mod tests {
             display_path(Path::new("/repo/.pi/settings.json"), home),
             "/repo/.pi/settings.json"
         );
+    }
+
+    #[test]
+    fn resolve_pick_maps_indices_to_targets() {
+        // items are scriptable-first (claude, pi, codex) then manual (opencode, cursor)
+        assert!(matches!(
+            resolve_pick(0),
+            AgentPick::Scriptable(ScriptableAgent::Claude)
+        ));
+        assert!(matches!(
+            resolve_pick(2),
+            AgentPick::Scriptable(ScriptableAgent::Codex)
+        ));
+        assert!(matches!(
+            resolve_pick(3),
+            AgentPick::Manual(ManualAgent::Opencode)
+        ));
+        assert!(matches!(
+            resolve_pick(4),
+            AgentPick::Manual(ManualAgent::Cursor)
+        ));
     }
 
     #[test]
