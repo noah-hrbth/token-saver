@@ -113,17 +113,47 @@ impl ScriptableAgent {
                 "claude — add to {}:\n    \"env\": {{ \"TOKEN_SAVER\": \"1\" }}",
                 path.display()
             ),
-            Self::Pi => format!(
-                "pi — set \"shellCommandPrefix\" in {} to:\n{}",
-                path.display(),
-                pi::PREFIX_SNIPPET
-            ),
-            Self::Codex => format!(
-                "codex — add to {}:\n    [shell_environment_policy]\n    set = {{ TOKEN_SAVER = \"1\" }}",
-                path.display()
-            ),
+            Self::Pi => {
+                let base = format!(
+                    "pi — set \"shellCommandPrefix\" in {} to:\n{}",
+                    path.display(),
+                    pi::PREFIX_SNIPPET
+                );
+                match scope {
+                    Scope::Project => format!("{base}\n  note: {}", pi_project_trust_note()),
+                    Scope::Global => base,
+                }
+            }
+            Self::Codex => {
+                let base = format!(
+                    "codex — add to {}:\n    [shell_environment_policy]\n    set = {{ TOKEN_SAVER = \"1\" }}",
+                    path.display()
+                );
+                match scope {
+                    Scope::Project => format!("{base}\n  note: {}", codex_project_trust_note(root)),
+                    Scope::Global => base,
+                }
+            }
         }
     }
+}
+
+/// Caveat codex requires project-scoped config to actually load: the project
+/// must be marked trusted in the user-level config, or codex silently skips
+/// `.codex/` layers. Shared by `manual_instructions` and the wizard's
+/// post-write message.
+pub fn codex_project_trust_note(root: &Path) -> String {
+    let encoded_root = toml_edit::Value::from(root.display().to_string()).to_string();
+    format!(
+        "codex loads project config only for trusted projects — add to ~/.codex/config.toml:\n    [projects.{encoded_root}]\n    trust_level = \"trusted\""
+    )
+}
+
+/// Caveat pi requires trust before loading project settings. Interactive pi
+/// prompts for trust; non-interactive modes require a saved decision or
+/// `--approve` for the invocation.
+pub fn pi_project_trust_note() -> &'static str {
+    "pi loads project config only after project trust — approve the prompt in interactive pi, or use `pi --approve` in non-interactive mode"
 }
 
 impl ManualAgent {
@@ -198,4 +228,39 @@ pub(crate) fn write_json_object(path: &Path, obj: &Map<String, Value>) -> io::Re
     }
     let serialized = serde_json::to_string_pretty(obj).expect("Map always serializes");
     fs::write(path, format!("{serialized}\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_manual_instructions_include_trust_note_for_project_scope_only() {
+        let root = Path::new("/repo");
+        let project = ScriptableAgent::Codex.manual_instructions(Scope::Project, root);
+        assert!(project.contains("trust_level"));
+        assert!(project.contains("/repo"));
+
+        let home = Path::new("/Users/x");
+        let global = ScriptableAgent::Codex.manual_instructions(Scope::Global, home);
+        assert!(!global.contains("trust_level"));
+    }
+
+    #[test]
+    fn codex_trust_note_escapes_toml_special_path_characters() {
+        let note = codex_project_trust_note(Path::new("/repo/a\"b\\c"));
+        let toml = note.split_once("    ").unwrap().1;
+        assert!(toml.parse::<toml_edit::DocumentMut>().is_ok());
+    }
+
+    #[test]
+    fn pi_manual_instructions_include_trust_note_for_project_scope_only() {
+        let root = Path::new("/repo");
+        let project = ScriptableAgent::Pi.manual_instructions(Scope::Project, root);
+        assert!(project.contains("project trust"));
+        assert!(project.contains("--approve"));
+
+        let global = ScriptableAgent::Pi.manual_instructions(Scope::Global, root);
+        assert!(!global.contains("project trust"));
+    }
 }

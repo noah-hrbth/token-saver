@@ -1,16 +1,17 @@
 use crate::agents::{Scope, ScriptableAgent};
 use crate::shell_hook::is_token_saver_hook;
-use crate::wizard;
 use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Dispatch entry point for `token-saver uninstall`.
 ///
 /// Reverses what `token-saver install` did:
 /// - strips token-saver lines from `~/.zshenv` and `~/.bashrc`
-/// - erases agent configs (claude/pi/codex), global and in the current repo
+/// - erases agent configs (claude/pi/codex) globally, and for the current
+///   repository when run from inside a git working tree
 /// - removes the legacy `~/.token-saver/bin` binary from the install.sh era
 ///
 /// The package-manager-installed binary itself is removed via
@@ -52,8 +53,9 @@ fn auto() -> i32 {
         erase_agent(agent, Scope::Global, &home, &mut errors);
     }
 
-    let root = wizard::project_root();
-    if root != home {
+    // project scope only inside a real repo — never rewrite agent config in
+    // whatever directory the user happens to be standing in
+    if let Some(root) = git_toplevel() {
         for agent in ScriptableAgent::ALL {
             erase_agent(agent, Scope::Project, &root, &mut errors);
         }
@@ -68,6 +70,27 @@ fn auto() -> i32 {
     println!();
     println!("Reload your shell to drop the wrappers (e.g. `source ~/.zshenv`).");
     0
+}
+
+/// Git toplevel of the current directory, or None when we are not inside a
+/// working tree. Deliberately has no cwd fallback — unlike install, where the
+/// user explicitly picks project scope, uninstall runs unattended and must not
+/// touch config in an arbitrary directory.
+fn git_toplevel() -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(out.stdout).ok()?;
+    let root = stdout.strip_suffix('\n').unwrap_or(&stdout);
+    let root = root.strip_suffix('\r').unwrap_or(root);
+    if root.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(root))
 }
 
 /// Erase one agent target's config, printing removals. Non-fatal: errors
@@ -136,25 +159,32 @@ fn clean_shell_profile(path: &Path) -> io::Result<bool> {
 }
 
 fn strip_token_saver_lines(content: &str) -> Option<String> {
-    let mut output: Vec<&str> = Vec::with_capacity(content.lines().count());
+    let lines: Vec<&str> = content.lines().collect();
+    let mut output: Vec<&str> = Vec::with_capacity(lines.len());
     let mut changed = false;
-    let mut iter = content.lines();
+    let mut index = 0;
 
-    while let Some(line) = iter.next() {
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim_start();
 
         // Legacy inlined block: drop everything from the marker comment
         // through the matching `fi`.
         if trimmed.starts_with("# token-saver: wrap commands") {
+            let terminator = (index + 1..lines.len()).find(|&j| lines[j].trim() == "fi");
+            let Some(end) = terminator else {
+                // unterminated block — the profile is already malformed, so
+                // leave it verbatim rather than eating every line that follows
+                output.push(line);
+                index += 1;
+                continue;
+            };
             changed = true;
-            for inner in iter.by_ref() {
-                if inner.trim() == "fi" {
-                    break;
-                }
-            }
+            index = end + 1;
             continue;
         }
 
+        index += 1;
         if trimmed.starts_with("# token-saver:")
             || is_token_saver_hook(trimmed)
             || trimmed.contains(".token-saver/bin")
@@ -221,6 +251,35 @@ mod tests {
         let input = "export FOO=bar\n# token-saver: wrap commands for LLM output compression\nif [ \"$TOKEN_SAVER\" = \"1\" ]; then\n    git() { /path/token-saver git \"$@\"; }\n    ls() { /path/token-saver ls \"$@\"; }\nfi\nexport BAR=baz\n";
         let out = strip_token_saver_lines(input).expect("changed");
         assert_eq!(out, "export FOO=bar\nexport BAR=baz\n");
+    }
+
+    #[test]
+    fn strip_treats_an_unterminated_legacy_block_as_no_change() {
+        // marker present but no matching `fi` — the block is malformed, so we
+        // report nothing to clean rather than rewriting the profile
+        // (survival of the following lines is proven by the sibling test)
+        let input = "export FOO=bar\n\
+            # token-saver: wrap commands for LLM output compression\n\
+            if [ \"$TOKEN_SAVER\" = \"1\" ]; then\n\
+            \x20   git() { /path/token-saver git \"$@\"; }\n\
+            export BAR=baz\n";
+        // nothing else in the file matches, so the malformed block alone is
+        // not treated as a change
+        assert!(strip_token_saver_lines(input).is_none());
+    }
+
+    #[test]
+    fn strip_keeps_unterminated_block_while_removing_real_hook() {
+        let input = format!(
+            "# token-saver: wrap commands for LLM output compression\n\
+            if [ \"$TOKEN_SAVER\" = \"1\" ]; then\n\
+            export BAR=baz\n{HOOK_LINE}\n"
+        );
+        let out = strip_token_saver_lines(&input).expect("changed");
+        // the real hook is gone, the malformed block and user content remain
+        assert!(!out.contains("eval "));
+        assert!(out.contains("# token-saver: wrap commands"));
+        assert!(out.contains("export BAR=baz"));
     }
 
     #[test]

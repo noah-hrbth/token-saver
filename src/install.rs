@@ -131,19 +131,24 @@ fn auto(binary: &str) -> i32 {
         return 1;
     }
 
-    let settings = home.join(".claude").join("settings.json");
-    match agents::claude::write_env(&settings) {
-        Ok(true) => println!("Added TOKEN_SAVER=1 to {}", settings.display()),
-        Ok(false) => println!(
-            "TOKEN_SAVER=1 already present in {} — skipping",
-            settings.display()
-        ),
-        Err(e) => {
-            eprintln!(
-                "token-saver install: failed to update {}: {e}",
-                settings.display()
-            );
-            return 1;
+    for agent in agents::ScriptableAgent::ALL {
+        if !agent.detected(agents::Scope::Global, &home) {
+            continue;
+        }
+        let path = agent.config_path(agents::Scope::Global, &home);
+        match agent.write(agents::Scope::Global, &home) {
+            Ok(true) => println!("Added TOKEN_SAVER=1 to {}", path.display()),
+            Ok(false) => println!(
+                "TOKEN_SAVER=1 already present in {} — skipping",
+                path.display()
+            ),
+            Err(e) => {
+                eprintln!(
+                    "token-saver install: failed to update {}: {e}",
+                    path.display()
+                );
+                return 1;
+            }
         }
     }
 
@@ -213,25 +218,33 @@ pub(crate) fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io
     // legacy block body. Path-agnostic so it migrates across `brew upgrade` /
     // reinstall too, and produces the same shape as a fresh install.
     if hook_count >= 1 || has_legacy_block {
-        let mut out: Vec<&str> = Vec::with_capacity(existing.lines().count());
+        let lines: Vec<&str> = existing.lines().collect();
+        let mut out: Vec<&str> = Vec::with_capacity(lines.len());
         let mut canonical_emitted = false;
-        let mut iter = existing.lines();
-        while let Some(line) = iter.next() {
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
             let trimmed = line.trim_start();
             // legacy inlined block: drop marker through matching `fi`
             if trimmed.starts_with("# token-saver: wrap commands") {
-                for inner in iter.by_ref() {
-                    if inner.trim() == "fi" {
-                        break;
-                    }
-                }
+                let terminator = (index + 1..lines.len()).find(|&j| lines[j].trim() == "fi");
+                let Some(end) = terminator else {
+                    // unterminated block — leave the marker alone and keep
+                    // scanning, so we never eat the rest of the profile and
+                    // a later hook line can still be collapsed normally
+                    out.push(line);
+                    index += 1;
+                    continue;
+                };
                 if !canonical_emitted {
                     out.push(HOOK_MARKER);
                     out.push(&canonical);
                     canonical_emitted = true;
                 }
+                index = end + 1;
                 continue;
             }
+            index += 1;
             if is_token_saver_hook(trimmed) {
                 if !canonical_emitted {
                     out.push(HOOK_MARKER);
@@ -247,11 +260,29 @@ pub(crate) fn update_shell_profile(path: &Path, shell: &str, binary: &str) -> io
         }
         let mut updated = out.join("\n");
         updated.push('\n');
+        // a malformed legacy block never had a chance to emit the canonical
+        // hook mid-loop — append it now so the profile still ends up correct
+        if !canonical_emitted {
+            updated.push_str(&format!("\n{HOOK_MARKER}\n{canonical}\n"));
+        }
+
+        if updated == existing {
+            println!(
+                "Shell hook already present in {} — skipping",
+                path.display()
+            );
+            return Ok(());
+        }
+
         fs::write(path, updated)?;
-        println!(
-            "Upgraded shell hook in {} to the canonical install form",
-            path.display()
-        );
+        if canonical_emitted {
+            println!(
+                "Upgraded shell hook in {} to the canonical install form",
+                path.display()
+            );
+        } else {
+            println!("Added shell hook to {}", path.display());
+        }
         return Ok(());
     }
 
@@ -444,5 +475,36 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.starts_with("export FOO=bar\n"));
         assert!(content.contains("eval \"$('/opt/homebrew/bin/token-saver' install zsh)\""));
+    }
+
+    #[test]
+    fn shell_profile_preserves_content_after_unterminated_legacy_block() {
+        // hand-truncated profile: marker present but the matching `fi` is
+        // missing, so the block must be left alone rather than eating every
+        // line that follows
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".zshenv");
+        let original = "export FOO=bar\n\
+            # token-saver: wrap commands for LLM output compression\n\
+            if [ \"$TOKEN_SAVER\" = \"1\" ]; then\n\
+            \x20   git() { /old/path/token-saver git \"$@\"; }\n\
+            export BAR=baz\n";
+        fs::write(&path, original).unwrap();
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+
+        // nothing after the malformed block was lost
+        assert!(content.contains("export FOO=bar"));
+        assert!(content.contains("export BAR=baz"));
+        assert!(content.contains("git() { /old/path/token-saver git \"$@\"; }"));
+        // the canonical hook still gets installed
+        let canonical = r#"eval "$('/opt/homebrew/bin/token-saver' install zsh)""#;
+        assert!(content.contains(canonical));
+
+        // re-running converges instead of appending another hook each time
+        update_shell_profile(&path, "zsh", BIN).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(second, content);
+        assert_eq!(second.matches(canonical).count(), 1);
     }
 }

@@ -18,7 +18,7 @@ token-saver install
 2. **Scope** — global (config under `$HOME`) or project (config committed to the repo)
 3. **Agents** — checkbox selection of detected agents. Auto-configures **claude**, **pi**, and **codex**; **opencode** and **cursor** get printed manual instructions (no config-file env mechanism — see the research section in `COMPRESSORS.md`)
 
-When stdin is not a TTY (scripts, CI), `install` falls back to the silent behavior: shell profile + `~/.claude/settings.json`. Everything is idempotent — re-running is safe. Run `token-saver uninstall` to reverse the setup (including project-scoped configs and the legacy `~/.token-saver/bin` binary), or `token-saver version` to print the installed version.
+When stdin is not a TTY (scripts, CI), `install` silently updates the shell profile and every scriptable agent detected at its default global config directory; undetected agents are skipped. Everything is idempotent — re-running is safe. Run `token-saver uninstall` to reverse the setup (including project-scoped configs and the legacy `~/.token-saver/bin` binary), or `token-saver version` to print the installed version.
 
 After `install`, reload your shell:
 

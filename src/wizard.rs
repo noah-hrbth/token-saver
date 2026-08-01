@@ -2,7 +2,9 @@
 //! a TTY. Three steps: shell hook (always global), install scope, agent
 //! selection. Non-TTY callers fall back to the silent path in `install`.
 
-use crate::agents::{ManualAgent, Scope, ScriptableAgent};
+use crate::agents::{
+    ManualAgent, Scope, ScriptableAgent, codex_project_trust_note, pi_project_trust_note,
+};
 use crate::install;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{MultiSelect, Select};
@@ -161,7 +163,10 @@ fn step_scope(theme: &ColorfulTheme, home: &Path) -> Result<(Scope, PathBuf), i3
         return Ok((Scope::Global, home.to_path_buf()));
     }
 
-    let root = project_root();
+    let root = project_root().map_err(|e| {
+        eprintln!("token-saver install: project scope requires a Git repository: {e}");
+        1
+    })?;
     println!("Using project root: {}", root.display());
     Ok((Scope::Project, root))
 }
@@ -234,10 +239,12 @@ fn step_agents(
                 match agent.write(scope, root) {
                     Ok(true) => {
                         println!("Configured {} ({path})", agent.name());
+                        print_project_trust_note(agent, scope, root);
                         outcomes.push(format!("{:<13} configured → {path}", agent.name()));
                     }
                     Ok(false) => {
                         println!("{} already configured — skipping", agent.name());
+                        print_project_trust_note(agent, scope, root);
                         outcomes.push(format!("{:<13} already configured", agent.name()));
                     }
                     Err(e) => {
@@ -258,6 +265,18 @@ fn step_agents(
         }
     }
     Ok((outcomes, failed))
+}
+
+/// Print project-trust caveats after writes and already-configured results.
+fn print_project_trust_note(agent: ScriptableAgent, scope: Scope, root: &Path) {
+    if scope != Scope::Project {
+        return;
+    }
+    match agent {
+        ScriptableAgent::Pi => println!("  note: {}", pi_project_trust_note()),
+        ScriptableAgent::Codex => println!("  note: {}", codex_project_trust_note(root)),
+        ScriptableAgent::Claude => {}
+    }
 }
 
 /// A checkbox index resolved to its concrete agent target.
@@ -309,20 +328,37 @@ fn display_path(path: &Path, home: &Path) -> String {
     }
 }
 
-/// Project root = git toplevel, falling back to the current directory.
-pub(crate) fn project_root() -> PathBuf {
-    if let Ok(out) = Command::new("git")
+/// Resolve the current Git worktree root for project-scoped configuration.
+pub(crate) fn project_root() -> std::io::Result<PathBuf> {
+    project_root_at(&env::current_dir()?)
+}
+
+fn project_root_at(cwd: &Path) -> std::io::Result<PathBuf> {
+    let out = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
-        .output()
-        && out.status.success()
-        && let Ok(stdout) = String::from_utf8(out.stdout)
-    {
-        let trimmed = stdout.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+        .current_dir(cwd)
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} is not inside a Git worktree", cwd.display()),
+        ));
     }
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let stdout = String::from_utf8(out.stdout).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("git returned a non-UTF-8 worktree path: {e}"),
+        )
+    })?;
+    let root = stdout.strip_suffix('\n').unwrap_or(&stdout);
+    let root = root.strip_suffix('\r').unwrap_or(root);
+    if root.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "git returned an empty worktree path",
+        ));
+    }
+    Ok(PathBuf::from(root))
 }
 
 fn prompt_failed(e: dialoguer::Error) -> i32 {
@@ -347,6 +383,30 @@ mod tests {
             display_path(Path::new("/repo/.pi/settings.json"), home),
             "/repo/.pi/settings.json"
         );
+    }
+
+    #[test]
+    fn project_root_rejects_directory_outside_a_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = project_root_at(directory.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn project_root_preserves_trailing_path_whitespace() {
+        let container = tempfile::tempdir().unwrap();
+        let repository = container.path().join("repo ");
+        std::fs::create_dir(&repository).unwrap();
+        let output = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+
+        let root = project_root_at(&repository).unwrap();
+
+        assert_eq!(root, std::fs::canonicalize(repository).unwrap());
     }
 
     #[test]

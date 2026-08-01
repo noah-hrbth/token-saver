@@ -51,10 +51,17 @@ Tracking which command compressors are implemented and which are planned.
 - [ ] `docker build` — strip layer-by-layer output, show: success/fail, image ID, warnings
 - [ ] `docker ps` — compact format: name, status, ports only
 
-## Agent integrations (research)
+## Agent integrations
 
-Agents the install wizard cannot auto-configure yet — they fall back to printed
-manual instructions. Research deeper before they become scriptable targets:
+The install wizard auto-configures these scriptable targets:
+
+- [x] `claude` — sets `env.TOKEN_SAVER` in `.claude/settings.json`
+- [x] `pi` — manages a delimited `shellCommandPrefix` region in Pi settings; project config requires Pi project trust
+- [x] `codex` — sets `shell_environment_policy.set.TOKEN_SAVER` in `.codex/config.toml`; project config requires Codex project trust
+
+The wizard prints manual instructions for these targets pending further research:
 
 - [ ] `opencode` — no documented config mechanism to inject env (`TOKEN_SAVER=1`) into tool subprocesses; only `{env:...}` substitution exists. Research: plugin/hook API or upstream feature request
 - [ ] `cursor cli` — shell execution + env injection mechanism unknown (config docs are JS-rendered). Research: how cursor-agent spawns commands and where env can be set, global + project
+- [ ] claude/codex shell wrapper loading — `.zshenv` is sourced for every zsh invocation, but `.bashrc` is not sourced for non-interactive bash, so `TOKEN_SAVER=1` without loaded wrappers is a silent no-op; Codex has `shell_environment_policy.experimental_use_profile` and `features.shell_snapshot`, which may affect this. Research: confirm empirically that Claude and Codex intercept wrapped commands under both supported shells
+- [ ] pi `shellCommandPrefix` overhead — the snippet checks for token-saver and regenerates/evaluates the bash wrapper block on every Pi bash invocation. Research: measure the overhead and consider caching the wrapper block
