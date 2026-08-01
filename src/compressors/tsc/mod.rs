@@ -443,7 +443,7 @@ fn render_output(diagnostics: &[TscDiagnostic], cwd: &Option<String>) -> Option<
                 .iter()
                 .enumerate()
                 .map(|(i, entry)| {
-                    let padded_loc = format!("{:>width$}", &loc_strings[i], width = max_loc_width);
+                    let padded_loc = format!("{:>width$}", loc_strings[i], width = max_loc_width);
                     let mut lines = if code_header {
                         vec![format!("  {}  {}", padded_loc, entry.message)]
                     } else {

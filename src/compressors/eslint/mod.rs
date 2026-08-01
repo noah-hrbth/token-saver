@@ -257,7 +257,7 @@ fn render_output(
                 .iter()
                 .enumerate()
                 .map(|(i, problem)| {
-                    let padded_loc = format!("{:>width$}", &loc_strings[i], width = max_loc_width);
+                    let padded_loc = format!("{:>width$}", loc_strings[i], width = max_loc_width);
                     Item::new(format!(
                         "  {}  {}  {}  {}",
                         padded_loc, problem.severity, problem.message, problem.rule_id

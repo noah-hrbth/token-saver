@@ -235,12 +235,8 @@ fn parse_log(raw: &str, has_patch: bool, has_stat: bool) -> Option<Vec<LogEntry>
         if chunk.trim().is_empty() {
             continue;
         }
-        if let Some(entry) = parse_log_entry(chunk, has_patch, has_stat) {
-            entries.push(entry);
-        } else {
-            // Malformed chunk → give up on the whole output
-            return None;
-        }
+        let entry = parse_log_entry(chunk, has_patch, has_stat)?;
+        entries.push(entry);
     }
 
     Some(entries)
